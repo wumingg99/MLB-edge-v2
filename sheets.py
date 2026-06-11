@@ -28,7 +28,7 @@ def log_prediction(game, prediction, odds_entry):
             prediction.get("rl_pred"),
             prediction.get("rl_conf"),
             prediction.get("rl_votes"),
-            prediction.get("rl_edge_flagged"),
+            prediction.get("edge_flagged"),
             prediction.get("has_real_pitchers"),
             None, None, None, None, None, None, None
         ]

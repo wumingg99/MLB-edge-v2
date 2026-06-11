@@ -161,8 +161,8 @@ def poisson_total_prob(context, total):
         hf = context.get("home_form") or {}
         af = context.get("away_form") or {}
         park_factor = float(context.get("park_factor", 1.0))
-        weather_factor = float(context.get("weather") or {}).get(
-            "weather_factor", 1.0)
+        weather_data = context.get("weather") or {}
+        weather_factor = float(weather_data.get("weather_factor", 1.0))
 
         home_rpg = float(hs.get("rpg", 4.5))
         away_rpg = float(as_.get("rpg", 4.5))
