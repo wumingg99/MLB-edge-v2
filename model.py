@@ -1,15 +1,220 @@
-import numpy as np
-import pickle
+import math
 import os
+import pickle
 from datetime import datetime
-import pytz
+from pathlib import Path
 
-LEAGUE_AVG_TOTAL = 8.8
+import numpy as np
 
-def build_features(context, total, run_line):
+
+MODEL_VERSION = "v3-price-aware-2026-06"
+MODEL_PATH = Path(__file__).with_name("models.pkl")
+LEAGUE_AVG_RPG = 4.5
+LEAGUE_AVG_RA9 = 4.5
+LEAGUE_AVG_OPS = 0.720
+FIP_CONSTANT = 3.10
+LEAGUE_HR_PER_FLY_BALL = 0.12
+
+FEATURE_NAMES = (
+    "home_rpg", "away_rpg", "home_ra9", "away_ra9",
+    "home_ops", "away_ops", "home_win_pct", "away_win_pct",
+    "home_recent_rpg", "away_recent_rpg",
+    "home_recent_ra9", "away_recent_ra9",
+    "home_recent_ops", "away_recent_ops",
+    "home_recent_win_pct", "away_recent_win_pct",
+    "home_ema_rpg", "away_ema_rpg", "home_ema_ra9", "away_ema_ra9",
+    "home_pitcher_era", "away_pitcher_era",
+    "home_pitcher_fip", "away_pitcher_fip",
+    "home_pitcher_xfip", "away_pitcher_xfip",
+    "home_pitcher_k9", "away_pitcher_k9",
+    "home_pitcher_bb9", "away_pitcher_bb9",
+    "home_pitcher_whip", "away_pitcher_whip",
+    "home_pitcher_ip", "away_pitcher_ip",
+    "home_recent_pitcher_era", "away_recent_pitcher_era",
+    "home_recent_pitcher_k9", "away_recent_pitcher_k9",
+    "home_recent_pitcher_bb9", "away_recent_pitcher_bb9",
+    "home_bullpen_era", "away_bullpen_era",
+    "home_bullpen_workload", "away_bullpen_workload",
+    "park_run_factor", "park_hr_factor", "weather_factor", "is_open_air",
+    "home_rest_days", "away_rest_days",
+    "month_sin", "month_cos", "season_progress", "data_quality",
+)
+
+
+def _safe_float(value, default):
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def parse_innings(value):
+    """Convert baseball innings notation (12.1 == 12 1/3) to innings."""
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    if "." not in text:
+        return _safe_float(text, 0.0)
+    whole, partial = text.split(".", 1)
+    outs = int(partial[:1]) if partial[:1].isdigit() else 0
+    if outs not in (0, 1, 2):
+        return _safe_float(text, 0.0)
+    return int(whole or 0) + outs / 3.0
+
+
+def compute_pitching_metrics(stat):
+    """Compute rate statistics MLB Stats API does not supply directly."""
+    stat = stat or {}
+    outs = _safe_float(stat.get("outs"), 0.0)
+    innings = outs / 3.0 if outs > 0 else parse_innings(
+        stat.get("inningsPitched")
+    )
+    innings = max(innings, 0.0)
+    earned_runs = _safe_float(stat.get("earnedRuns"), 0.0)
+    strikeouts = _safe_float(
+        stat.get("strikeOuts", stat.get("strikeouts")), 0.0
+    )
+    walks = _safe_float(stat.get("baseOnBalls"), 0.0)
+    hit_batters = _safe_float(stat.get("hitBatsmen"), 0.0)
+    home_runs = _safe_float(stat.get("homeRuns"), 0.0)
+    hits = _safe_float(stat.get("hits"), 0.0)
+    air_outs = _safe_float(stat.get("airOuts"), 0.0)
+
+    if innings <= 0:
+        return {
+            "era": 4.50, "fip": 4.50, "xfip": 4.50,
+            "k9": 8.0, "bb9": 3.0, "whip": 1.30,
+            "ip": 0.0, "sample_size": 0.0,
+        }
+
+    era = 9.0 * earned_runs / innings
+    fip = (
+        13.0 * home_runs
+        + 3.0 * (walks + hit_batters)
+        - 2.0 * strikeouts
+    ) / innings + FIP_CONSTANT
+    expected_home_runs = (
+        air_outs * LEAGUE_HR_PER_FLY_BALL
+        if air_outs > 0 else home_runs
+    )
+    xfip = (
+        13.0 * expected_home_runs
+        + 3.0 * (walks + hit_batters)
+        - 2.0 * strikeouts
+    ) / innings + FIP_CONSTANT
+    return {
+        "era": float(np.clip(era, 0.0, 15.0)),
+        "fip": float(np.clip(fip, 0.0, 15.0)),
+        "xfip": float(np.clip(xfip, 0.0, 15.0)),
+        "k9": float(np.clip(9.0 * strikeouts / innings, 0.0, 25.0)),
+        "bb9": float(np.clip(9.0 * walks / innings, 0.0, 15.0)),
+        "whip": float(np.clip((walks + hits) / innings, 0.0, 5.0)),
+        "ip": float(innings),
+        "sample_size": float(min(innings / 50.0, 1.0)),
+    }
+
+
+def american_to_implied(price):
+    price = _safe_float(price, 0.0)
+    if price == 0:
+        return None
+    return 100.0 / (price + 100.0) if price > 0 else -price / (-price + 100.0)
+
+
+def american_profit(price):
+    price = _safe_float(price, 0.0)
+    if price == 0:
+        return None
+    return price / 100.0 if price > 0 else 100.0 / -price
+
+
+def no_vig_probabilities(price_a, price_b):
+    implied_a = american_to_implied(price_a)
+    implied_b = american_to_implied(price_b)
+    if implied_a is None or implied_b is None:
+        return None, None
+    total = implied_a + implied_b
+    return (
+        (implied_a / total, implied_b / total)
+        if total > 0 else (None, None)
+    )
+
+
+def expected_value(p_win, p_loss, price):
+    profit = american_profit(price)
+    return None if profit is None else float(p_win * profit - p_loss)
+
+
+def quarter_kelly(p_win, p_loss, price, fraction=0.25, cap=0.02):
+    profit = american_profit(price)
+    if profit is None or profit <= 0:
+        return 0.0
+    full_kelly = (profit * p_win - p_loss) / profit
+    return float(np.clip(full_kelly * fraction, 0.0, cap))
+
+
+def grade_total(actual_total, line, side):
+    actual_total = _safe_float(actual_total, 0.0)
+    line = _safe_float(line, 0.0)
+    if math.isclose(actual_total, line, abs_tol=1e-9):
+        return "PUSH"
+    if side == "OVER":
+        return "WIN" if actual_total > line else "LOSS"
+    if side == "UNDER":
+        return "WIN" if actual_total < line else "LOSS"
+    return "INVALID"
+
+
+def grade_spread(home_margin, side, point):
+    home_margin = _safe_float(home_margin, 0.0)
+    point = _safe_float(point, 0.0)
+    adjusted = home_margin + point if side == "HOME" else -home_margin + point
+    if side not in ("HOME", "AWAY"):
+        return "INVALID"
+    if math.isclose(adjusted, 0.0, abs_tol=1e-9):
+        return "PUSH"
+    return "WIN" if adjusted > 0 else "LOSS"
+
+
+def _context_date(context):
+    raw = context.get("as_of") or context.get("game_date")
+    if isinstance(raw, datetime):
+        return raw
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.utcnow()
+
+
+def _derive_data_quality(context):
+    if context.get("data_quality") is not None:
+        return float(np.clip(_safe_float(context["data_quality"], 0.0), 0, 1))
+    hp = context.get("home_pitcher") or {}
+    ap = context.get("away_pitcher") or {}
+    hs = context.get("home_stats") or {}
+    away_stats = context.get("away_stats") or {}
+    components = [
+        1.0 if context.get("has_real_pitchers") else 0.0,
+        min(_safe_float(hp.get("ip"), 0.0) / 30.0, 1.0),
+        min(_safe_float(ap.get("ip"), 0.0) / 30.0, 1.0),
+        min(_safe_float(hs.get("games"), 0.0) / 20.0, 1.0),
+        min(_safe_float(away_stats.get("games"), 0.0) / 20.0, 1.0),
+        1.0 if context.get("weather") else 0.5,
+    ]
+    return float(np.mean(components))
+
+
+def build_features(context, total=None, run_line=None):
+    """Build line-independent features available before first pitch."""
+    del total, run_line
     try:
         hs = context.get("home_stats") or {}
-        as_ = context.get("away_stats") or {}
+        away_stats = context.get("away_stats") or {}
         hf = context.get("home_form") or {}
         af = context.get("away_form") or {}
         hp = context.get("home_pitcher") or {}
@@ -18,580 +223,812 @@ def build_features(context, total, run_line):
         apr = context.get("away_pitcher_recent") or {}
         hb = context.get("home_bullpen") or {}
         ab = context.get("away_bullpen") or {}
-        park_factor = float(context.get("park_factor", 1.0))
-        park_hr = float(context.get("park_hr_factor", 1.0))
         weather = context.get("weather") or {}
-        weather_factor = float(weather.get("weather_factor", 1.0))
-        is_dome = bool(weather.get("is_dome", False))
 
-        # Season stats
-        home_rpg = float(hs.get("rpg", 4.5))
-        away_rpg = float(as_.get("rpg", 4.5))
-        home_ops = float(hs.get("ops", 0.720))
-        away_ops = float(as_.get("ops", 0.720))
-        home_era = float(hs.get("team_era", 4.50))
-        away_era = float(as_.get("team_era", 4.50))
+        as_of = _context_date(context)
+        month_angle = 2.0 * math.pi * (as_of.month - 1) / 12.0
+        season_start = datetime(as_of.year, 3, 20, tzinfo=as_of.tzinfo)
+        season_end = datetime(as_of.year, 10, 1, tzinfo=as_of.tzinfo)
+        season_days = max((season_end - season_start).days, 1)
+        progress = np.clip((as_of - season_start).days / season_days, 0, 1)
+        quality = _derive_data_quality(context)
+        home_ra9 = _safe_float(
+            hs.get("ra9", hs.get("team_era")), LEAGUE_AVG_RA9
+        )
+        away_ra9 = _safe_float(
+            away_stats.get("ra9", away_stats.get("team_era")),
+            LEAGUE_AVG_RA9,
+        )
 
-        # Recent form (last 10 games) — KEY v2 feature
-        home_recent_rpg = float(hf.get("recent_rpg", home_rpg))
-        away_recent_rpg = float(af.get("recent_rpg", away_rpg))
-        home_recent_ops = float(hf.get("recent_ops", home_ops))
-        away_recent_ops = float(af.get("recent_ops", away_ops))
-        home_form_trend = float(hf.get("form_trend", 0))
-        away_form_trend = float(af.get("form_trend", 0))
-        home_recent_win_pct = float(hf.get("recent_win_pct", 0.500))
-        away_recent_win_pct = float(af.get("recent_win_pct", 0.500))
-
-        # Pitcher season stats
-        home_xfip = float(hp.get("xfip", 4.50))
-        away_xfip = float(ap.get("xfip", 4.50))
-        home_fip = float(hp.get("fip", 4.50))
-        away_fip = float(ap.get("fip", 4.50))
-        home_k9 = float(hp.get("k9", 8.0))
-        away_k9 = float(ap.get("k9", 8.0))
-        home_bb9 = float(hp.get("bb9", 3.0))
-        away_bb9 = float(ap.get("bb9", 3.0))
-
-        # Pitcher recent form (last 3 starts) — KEY v2 feature
-        home_recent_era = float(hpr.get("recent_era", home_xfip))
-        away_recent_era = float(apr.get("recent_era", away_xfip))
-        home_pitcher_trend = float(hpr.get("recent_trend", 0))
-        away_pitcher_trend = float(apr.get("recent_trend", 0))
-        home_recent_k9 = float(hpr.get("recent_k9", home_k9))
-        away_recent_k9 = float(apr.get("recent_k9", away_k9))
-
-        # Bullpen
-        home_bullpen_era = float(hb.get("bullpen_era", 4.50))
-        away_bullpen_era = float(ab.get("bullpen_era", 4.50))
-
-        # Combined metrics
-        xfip_combined = (home_xfip + away_xfip) / 2
-        fip_combined = (home_fip + away_fip) / 2
-        k9_combined = (home_k9 + away_k9) / 2
-        bb9_combined = (home_bb9 + away_bb9) / 2
-        kbb_ratio = k9_combined / max(bb9_combined, 0.1)
-        ops_combined = (home_ops + away_ops) / 2
-        rpg_combined = (home_rpg + away_rpg) / 2
-        bullpen_combined = (home_bullpen_era + away_bullpen_era) / 2
-
-        # Recent form combined
-        recent_rpg_combined = (home_recent_rpg + away_recent_rpg) / 2
-        recent_era_combined = (home_recent_era + away_recent_era) / 2
-        form_momentum = (home_form_trend + away_form_trend) / 2
-        pitcher_momentum = (home_pitcher_trend + away_pitcher_trend) / 2
-
-        # Environment
-        env_factor = park_factor * weather_factor
-        dome_factor = 0.0 if is_dome else 1.0
-
-        # Implied total using recent form (v2 uses recent, not season)
-        implied_total_season = (home_rpg + away_rpg) * env_factor
-        implied_total_recent = (home_recent_rpg + away_recent_rpg) * env_factor
-        # Blend season and recent (60% recent, 40% season)
-        implied_total = (0.6 * implied_total_recent +
-                         0.4 * implied_total_season)
-        implied_total = max(3.0, min(implied_total, 20.0))
-
-        vegas_line = total if total else LEAGUE_AVG_TOTAL
-        total_gap = implied_total - vegas_line
-
-        # Run line context
-        home_strength = (home_rpg - home_era +
-                         (home_recent_win_pct - 0.5) * 2)
-        away_strength = (away_rpg - away_era +
-                         (away_recent_win_pct - 0.5) * 2)
-        strength_diff = home_strength - away_strength
-        run_line_norm = (run_line or (-1.5 if strength_diff > 0 else 1.5)) / 2
-
-        # Season timing
-        month = datetime.now(pytz.timezone("Asia/Singapore")).month
-        fatigue = (1.0 if month <= 6 else
-                   1.05 if month <= 8 else 1.10)
-
-        # 38 features (v1 had 30)
-        return [
-            # Pitcher season stats (6)
-            xfip_combined, fip_combined, k9_combined,
-            bb9_combined, kbb_ratio, (home_xfip - away_xfip),
-
-            # Pitcher recent form (4) — NEW in v2
-            recent_era_combined, pitcher_momentum,
-            home_recent_k9, away_recent_k9,
-
-            # Team season stats (6)
-            ops_combined, rpg_combined,
-            (home_rpg - away_rpg), (home_ops - away_ops),
-            (home_era - away_era), bullpen_combined,
-
-            # Team recent form (6) — NEW in v2
-            recent_rpg_combined, form_momentum,
-            home_recent_rpg, away_recent_rpg,
-            home_recent_win_pct, away_recent_win_pct,
-
-            # Environment (5)
-            park_factor, park_hr, weather_factor,
-            dome_factor, env_factor,
-
-            # Total context (4)
-            implied_total, total_gap,
-            vegas_line, (vegas_line - LEAGUE_AVG_TOTAL),
-
-            # Run line context (3)
-            run_line_norm, strength_diff,
-            home_recent_win_pct - away_recent_win_pct,
-
-            # Advanced metrics (4)
-            (home_recent_rpg - home_rpg),   # home form vs season
-            (away_recent_rpg - away_rpg),   # away form vs season
-            (home_recent_era - home_xfip),  # pitcher form vs season
-            (away_recent_era - away_xfip),  # pitcher form vs season
-
-            # Timing (1)
-            fatigue,
+        values = [
+            _safe_float(hs.get("rpg"), LEAGUE_AVG_RPG),
+            _safe_float(away_stats.get("rpg"), LEAGUE_AVG_RPG),
+            home_ra9, away_ra9,
+            _safe_float(hs.get("ops"), LEAGUE_AVG_OPS),
+            _safe_float(away_stats.get("ops"), LEAGUE_AVG_OPS),
+            _safe_float(hs.get("win_pct"), 0.5),
+            _safe_float(away_stats.get("win_pct"), 0.5),
+            _safe_float(hf.get("recent_rpg"), LEAGUE_AVG_RPG),
+            _safe_float(af.get("recent_rpg"), LEAGUE_AVG_RPG),
+            _safe_float(hf.get("recent_ra9"), home_ra9),
+            _safe_float(af.get("recent_ra9"), away_ra9),
+            _safe_float(hf.get("recent_ops"), hs.get("ops", LEAGUE_AVG_OPS)),
+            _safe_float(
+                af.get("recent_ops"), away_stats.get("ops", LEAGUE_AVG_OPS)
+            ),
+            _safe_float(hf.get("recent_win_pct"), 0.5),
+            _safe_float(af.get("recent_win_pct"), 0.5),
+            _safe_float(hf.get("ema_rpg"), hs.get("rpg", LEAGUE_AVG_RPG)),
+            _safe_float(
+                af.get("ema_rpg"), away_stats.get("rpg", LEAGUE_AVG_RPG)
+            ),
+            _safe_float(hf.get("ema_ra9"), home_ra9),
+            _safe_float(af.get("ema_ra9"), away_ra9),
+            _safe_float(hp.get("era"), 4.5),
+            _safe_float(ap.get("era"), 4.5),
+            _safe_float(hp.get("fip"), 4.5),
+            _safe_float(ap.get("fip"), 4.5),
+            _safe_float(hp.get("xfip"), 4.5),
+            _safe_float(ap.get("xfip"), 4.5),
+            _safe_float(hp.get("k9"), 8.0),
+            _safe_float(ap.get("k9"), 8.0),
+            _safe_float(hp.get("bb9"), 3.0),
+            _safe_float(ap.get("bb9"), 3.0),
+            _safe_float(hp.get("whip"), 1.3),
+            _safe_float(ap.get("whip"), 1.3),
+            min(_safe_float(hp.get("ip"), 0.0), 250.0),
+            min(_safe_float(ap.get("ip"), 0.0), 250.0),
+            _safe_float(hpr.get("recent_era"), hp.get("era", 4.5)),
+            _safe_float(apr.get("recent_era"), ap.get("era", 4.5)),
+            _safe_float(hpr.get("recent_k9"), hp.get("k9", 8.0)),
+            _safe_float(apr.get("recent_k9"), ap.get("k9", 8.0)),
+            _safe_float(hpr.get("recent_bb9"), hp.get("bb9", 3.0)),
+            _safe_float(apr.get("recent_bb9"), ap.get("bb9", 3.0)),
+            _safe_float(hb.get("bullpen_era"), 4.5),
+            _safe_float(ab.get("bullpen_era"), 4.5),
+            _safe_float(hb.get("bullpen_workload"), 0.0),
+            _safe_float(ab.get("bullpen_workload"), 0.0),
+            _safe_float(context.get("park_factor"), 1.0),
+            _safe_float(context.get("park_hr_factor"), 1.0),
+            _safe_float(weather.get("weather_factor"), 1.0),
+            0.0 if bool(weather.get("is_dome")) else 1.0,
+            min(_safe_float(context.get("home_rest_days"), 3.0), 10.0),
+            min(_safe_float(context.get("away_rest_days"), 3.0), 10.0),
+            math.sin(month_angle), math.cos(month_angle),
+            float(progress), quality,
         ]
-    except Exception as e:
-        print(f"Feature error: {e}")
+        if len(values) != len(FEATURE_NAMES):
+            raise ValueError(
+                f"Feature schema mismatch: {len(values)} != {len(FEATURE_NAMES)}"
+            )
+        return values
+    except Exception as exc:
+        print(f"Feature error: {exc}")
         return None
 
-def poisson_total_prob(context, total):
-    """Poisson regression for O/U — more statistically correct than logistic."""
-    try:
-        hs = context.get("home_stats") or {}
-        as_ = context.get("away_stats") or {}
-        hf = context.get("home_form") or {}
-        af = context.get("away_form") or {}
-        park_factor = float(context.get("park_factor", 1.0))
-        weather_data = context.get("weather") or {}
-        weather_factor = float(weather_data.get("weather_factor", 1.0))
 
-        home_rpg = float(hs.get("rpg", 4.5))
-        away_rpg = float(as_.get("rpg", 4.5))
-        home_recent = float(hf.get("recent_rpg", home_rpg))
-        away_recent = float(af.get("recent_rpg", away_rpg))
-
-        # Blend season and recent
-        home_exp = (0.6 * home_recent + 0.4 * home_rpg) * park_factor * weather_factor
-        away_exp = (0.6 * away_recent + 0.4 * away_rpg) * park_factor * weather_factor
-
-        home_exp = max(1.0, min(home_exp, 15.0))
-        away_exp = max(1.0, min(away_exp, 15.0))
-
-        # Poisson probability that total > vegas line
-        from scipy.stats import nbinom
-        vegas = total if total else LEAGUE_AVG_TOTAL
-        # Negative binomial handles baseball overdispersion better than Poisson
-        # Dispersion parameter r=5 calibrated for baseball run scoring
-        def nb_pmf(k, mu, r=5.0):
-            p = r / (r + mu)
-            return nbinom.pmf(k, r, p)
-        over_prob = 0.0
-        for h in range(0, 25):
-            for a in range(0, 25):
-                if h + a > vegas:
-                    over_prob += nb_pmf(h, home_exp) * nb_pmf(a, away_exp)
-        return round(over_prob, 3)
-    except Exception as e:
-        print(f"Poisson error: {e}")
-        return 0.5
-
-def calibrate_probability(raw_prob, calibrator=None):
-    """Apply isotonic regression calibration if available."""
-    if calibrator is None:
-        return raw_prob
-    try:
-        return float(calibrator.predict([[raw_prob]])[0])
-    except Exception:
-        return raw_prob
-
-def train_models():
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.ensemble import RandomForestClassifier
+def _make_regressors(random_state=42):
+    from sklearn.ensemble import (
+        ExtraTreesRegressor,
+        GradientBoostingRegressor,
+        HistGradientBoostingRegressor,
+        RandomForestRegressor,
+    )
+    from sklearn.linear_model import Ridge
+    from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score
-    from xgboost import XGBClassifier
-    try:
-        import lightgbm as lgb
-        has_lgb = True
-    except ImportError:
-        has_lgb = False
-        print("LightGBM not available — using 4 models")
-
-    print("Generating simulated training data for v2...")
-    np.random.seed(42)
-    X, y_total, y_runline = [], [], []
-
-    for _ in range(2000):
-        # Season stats
-        home_rpg = np.random.normal(4.5, 0.8)
-        away_rpg = np.random.normal(4.5, 0.8)
-        home_ops = np.random.normal(0.720, 0.05)
-        away_ops = np.random.normal(0.720, 0.05)
-        home_era = np.random.normal(4.50, 0.8)
-        away_era = np.random.normal(4.50, 0.8)
-        xfip_h = np.random.normal(4.2, 0.8)
-        xfip_a = np.random.normal(4.2, 0.8)
-        k9_h = np.random.normal(8.5, 1.5)
-        k9_a = np.random.normal(8.5, 1.5)
-        bb9_h = np.random.normal(3.0, 0.8)
-        bb9_a = np.random.normal(3.0, 0.8)
-
-        # Recent form — correlated with season but with noise
-        home_recent_rpg = home_rpg + np.random.normal(0, 0.5)
-        away_recent_rpg = away_rpg + np.random.normal(0, 0.5)
-        home_recent_era = xfip_h + np.random.normal(0, 0.5)
-        away_recent_era = xfip_a + np.random.normal(0, 0.5)
-        home_form_trend = np.random.normal(0, 0.3)
-        away_form_trend = np.random.normal(0, 0.3)
-        home_recent_win = np.random.uniform(0.3, 0.7)
-        away_recent_win = np.random.uniform(0.3, 0.7)
-        home_recent_k9 = k9_h + np.random.normal(0, 0.5)
-        away_recent_k9 = k9_a + np.random.normal(0, 0.5)
-        pitcher_trend_h = np.random.normal(0, 0.3)
-        pitcher_trend_a = np.random.normal(0, 0.3)
-
-        # Environment
-        park_f = np.random.choice([0.88, 0.92, 0.95, 1.0, 1.05, 1.10, 1.35])
-        weather_f = np.random.uniform(0.95, 1.08)
-        is_dome = np.random.choice([0.0, 1.0], p=[0.7, 0.3])
-        env_f = park_f * weather_f
-
-        # Implied total
-        impl_season = (home_rpg + away_rpg) * env_f
-        impl_recent = (home_recent_rpg + away_recent_rpg) * env_f
-        implied = 0.6 * impl_recent + 0.4 * impl_season
-        implied = max(3.0, min(implied, 20.0))
-
-        vegas = implied + np.random.uniform(-1.5, 1.5)
-        total_gap = implied - vegas
-        run_line = np.random.choice([-1.5, 1.5])
-        strength_diff = ((home_rpg - home_era) - (away_rpg - away_era) +
-                         (home_recent_win - away_recent_win) * 2)
-
-        xfip_comb = (xfip_h + xfip_a) / 2
-        fip_comb = (xfip_h * 0.9 + xfip_a * 0.9) / 2
-        k9_comb = (k9_h + k9_a) / 2
-        bb9_comb = (bb9_h + bb9_a) / 2
-        kbb = k9_comb / max(bb9_comb, 0.1)
-        ops_comb = (home_ops + away_ops) / 2
-        rpg_comb = (home_rpg + away_rpg) / 2
-        bullpen = np.random.normal(4.2, 0.5)
-        recent_rpg_comb = (home_recent_rpg + away_recent_rpg) / 2
-        recent_era_comb = (home_recent_era + away_recent_era) / 2
-        form_mom = (home_form_trend + away_form_trend) / 2
-        pitcher_mom = (pitcher_trend_h + pitcher_trend_a) / 2
-        fatigue = 1.0
-
-        features = [
-            xfip_comb, fip_comb, k9_comb, bb9_comb, kbb, xfip_h - xfip_a,
-            recent_era_comb, pitcher_mom, home_recent_k9, away_recent_k9,
-            ops_comb, rpg_comb, home_rpg - away_rpg, home_ops - away_ops,
-            home_era - away_era, bullpen,
-            recent_rpg_comb, form_mom, home_recent_rpg, away_recent_rpg,
-            home_recent_win, away_recent_win,
-            park_f, park_f, weather_f, is_dome, env_f,
-            implied, total_gap, vegas, vegas - LEAGUE_AVG_TOTAL,
-            run_line / 2, strength_diff, home_recent_win - away_recent_win,
-            home_recent_rpg - home_rpg, away_recent_rpg - away_rpg,
-            home_recent_era - xfip_h, away_recent_era - xfip_a,
-            fatigue,
-        ]
-
-        noise = np.random.normal(0, 1.5)
-        actual = implied + noise
-        goes_over = 1 if actual > vegas else 0
-        rl_margin = strength_diff * 0.5 + np.random.normal(0, 2.0)
-        home_is_fav = run_line < 0
-        covers_rl = 1 if (rl_margin > 1.5 if home_is_fav else rl_margin < -1.5) else 0
-
-        X.append(features)
-        y_total.append(goes_over)
-        y_runline.append(covers_rl)
-
-    X = np.array(X)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X_train, X_test, yt_train, yt_test = train_test_split(
-        X_scaled, y_total, test_size=0.2, random_state=42)
-    _, _, yr_train, yr_test = train_test_split(
-        X_scaled, y_runline, test_size=0.2, random_state=42)
-
-    models_total = {}
-    models_runline = {}
-
-    # LR
-    lr_t = LogisticRegression(max_iter=1000, random_state=42)
-    lr_t.fit(X_train, yt_train)
-    models_total["lr"] = lr_t
-    lr_r = LogisticRegression(max_iter=1000, random_state=42)
-    lr_r.fit(X_train, yr_train)
-    models_runline["lr"] = lr_r
-
-    # RF
-    rf_t = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf_t.fit(X_train, yt_train)
-    models_total["rf"] = rf_t
-    rf_r = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf_r.fit(X_train, yr_train)
-    models_runline["rf"] = rf_r
-
-    # XGB
-    xgb_t = XGBClassifier(n_estimators=100, random_state=42,
-                           eval_metric="logloss", verbosity=0)
-    xgb_t.fit(X_train, yt_train)
-    models_total["xgb"] = xgb_t
-    xgb_r = XGBClassifier(n_estimators=100, random_state=42,
-                           eval_metric="logloss", verbosity=0)
-    xgb_r.fit(X_train, yr_train)
-    models_runline["xgb"] = xgb_r
-
-    # LightGBM (v2 new model)
-    if has_lgb:
-        lgb_t = lgb.LGBMClassifier(n_estimators=100, random_state=42,
-                                    verbose=-1)
-        lgb_t.fit(X_train, yt_train)
-        models_total["lgb"] = lgb_t
-        lgb_r = lgb.LGBMClassifier(n_estimators=100, random_state=42,
-                                    verbose=-1)
-        lgb_r.fit(X_train, yr_train)
-        models_runline["lgb"] = lgb_r
-
-    # NN
-    nn_t = MLPClassifier(hidden_layer_sizes=(64, 32, 16),
-                         max_iter=2000, random_state=42)
-    nn_t.fit(X_train, yt_train)
-    models_total["nn"] = nn_t
-    nn_r = MLPClassifier(hidden_layer_sizes=(64, 32, 16),
-                         max_iter=2000, random_state=42)
-    nn_r.fit(X_train, yr_train)
-    models_runline["nn"] = nn_r
-
-    with open("models.pkl", "wb") as f:
-        pickle.dump({
-            "models_total": models_total,
-            "models_runline": models_runline,
-            "scaler": scaler,
-            "version": "v2",
-            "n_models": len(models_total),
-        }, f)
-    print(f"V2 simulated models saved ({len(models_total)} models)")
-    return models_total, models_runline, scaler
-
-def load_models():
-    if os.path.exists("models.pkl"):
-        with open("models.pkl", "rb") as f:
-            data = pickle.load(f)
-        if "models_runline" in data:
-            return (data["models_total"], data["models_runline"],
-                    data["scaler"],
-                    data.get("calibrators_total"),
-                    data.get("calibrators_runline"))
-    return None, None, None, None, None
-
-def ensemble_predict(models, X_scaled, calibrators=None):
-    weights = {"lr": 1, "rf": 2, "xgb": 3, "lgb": 3, "nn": 2}
-    weighted_prob = total_weight = 0
-    yes_votes = no_votes = 0
-    raw_probs = []
-    for name, model in models.items():
-        prob = model.predict_proba(X_scaled)[0][1]
-        raw_probs.append(prob)
-        # Apply calibration if available
-        if calibrators and name in calibrators:
-            prob = calibrate_probability(prob, calibrators[name])
-        w = weights.get(name, 1)
-        weighted_prob += prob * w
-        total_weight += w
-        if prob > 0.5:
-            yes_votes += 1
-        else:
-            no_votes += 1
-    avg_prob = weighted_prob / total_weight
-    return avg_prob, yes_votes, no_votes, len(models)
-
-def monte_carlo_simulate(context, total, n=10000):
-    np.random.seed(None)
-    hs = context.get("home_stats") or {}
-    as_ = context.get("away_stats") or {}
-    hf = context.get("home_form") or {}
-    af = context.get("away_form") or {}
-    park_factor = float(context.get("park_factor", 1.0))
-    weather_factor = float(
-        (context.get("weather") or {}).get("weather_factor", 1.0))
-
-    home_rpg = float(hs.get("rpg", 4.5))
-    away_rpg = float(as_.get("rpg", 4.5))
-    home_recent = float(hf.get("recent_rpg", home_rpg))
-    away_recent = float(af.get("recent_rpg", away_rpg))
-
-    # Blend season and recent
-    home_exp = (0.6 * home_recent + 0.4 * home_rpg) * park_factor * weather_factor
-    away_exp = (0.6 * away_recent + 0.4 * away_rpg) * park_factor * weather_factor
-    home_exp = max(1.0, min(home_exp, 15.0))
-    away_exp = max(1.0, min(away_exp, 15.0))
-
-    home_scores = np.random.poisson(home_exp, n)
-    away_scores = np.random.poisson(away_exp, n)
-    totals = home_scores + away_scores
-
-    vegas = total if total else LEAGUE_AVG_TOTAL
-    home_wins = np.sum(home_scores > away_scores)
-    ties = np.sum(home_scores == away_scores)
-    home_wins_final = home_wins + int(ties * 0.54)
-
-    mc_std = float(np.std(totals))
 
     return {
-        "home_win_prob": round(home_wins_final / n, 3),
-        "away_win_prob": round(1 - home_wins_final / n, 3),
-        "over_prob": round(np.sum(totals > vegas) / n, 3),
-        "simulated_avg_total": round(float(np.mean(totals)), 1),
-        "mc_std": round(mc_std, 2),
+        "ridge": Pipeline(
+            [("scale", StandardScaler()), ("model", Ridge(alpha=12.0))]
+        ),
+        "rf": RandomForestRegressor(
+            n_estimators=350, max_depth=9, min_samples_leaf=15,
+            max_features=0.75, n_jobs=-1, random_state=random_state,
+        ),
+        "extra": ExtraTreesRegressor(
+            n_estimators=350, max_depth=10, min_samples_leaf=12,
+            max_features=0.8, n_jobs=-1, random_state=random_state + 1,
+        ),
+        "hist": HistGradientBoostingRegressor(
+            max_iter=250, learning_rate=0.035, max_leaf_nodes=20,
+            min_samples_leaf=25, l2_regularization=2.0,
+            random_state=random_state,
+        ),
+        "gbr": GradientBoostingRegressor(
+            n_estimators=250, learning_rate=0.025, max_depth=2,
+            min_samples_leaf=20, loss="huber", random_state=random_state,
+        ),
     }
 
-def predict_game(context, total, run_line):
-    models_total, models_runline, scaler, cal_t, cal_r = load_models()
-    if models_total is None:
-        train_models()
-        models_total, models_runline, scaler, cal_t, cal_r = load_models()
 
-    features = build_features(context, total, run_line)
-    if features is None:
+def _fit_regressor(model, X, y, sample_weight):
+    try:
+        if hasattr(model, "named_steps"):
+            model.fit(X, y, model__sample_weight=sample_weight)
+        else:
+            model.fit(X, y, sample_weight=sample_weight)
+    except TypeError:
+        model.fit(X, y)
+
+
+def _prediction_matrix(models, X):
+    return np.column_stack(
+        [np.asarray(model.predict(X), dtype=float) for model in models.values()]
+    )
+
+
+def _weights_from_calibration(predictions, actual):
+    rmse = np.sqrt(np.mean((predictions - actual[:, None]) ** 2, axis=0))
+    inverse = 1.0 / np.maximum(rmse, 0.10)
+    return inverse / inverse.sum()
+
+
+def _ensemble(predictions, weights):
+    return np.asarray(predictions, dtype=float) @ np.asarray(weights, dtype=float)
+
+
+def _market_test_metrics(
+    records,
+    total_pred,
+    margin_pred,
+    residual_pairs,
+):
+    total_brier_values = []
+    total_roi_values = []
+    spread_brier_values = []
+    spread_roi_values = []
+    residual_total = residual_pairs[:, 0]
+    residual_margin = residual_pairs[:, 1]
+    for idx, record in enumerate(records):
+        market = record.get("market") or {}
+        line = market.get("total_line")
+        over_price = market.get("over_price")
+        under_price = market.get("under_price")
+        if line is not None and over_price is not None and under_price is not None:
+            total_samples = np.rint(
+                np.clip(total_pred[idx] + residual_total, 0, 30)
+            )
+            p_over = float(np.mean(total_samples > float(line)))
+            p_under = float(np.mean(total_samples < float(line)))
+            if record["actual_total"] != float(line):
+                actual_over = float(record["actual_total"] > float(line))
+                conditional_over = p_over / max(p_over + p_under, 1e-9)
+                total_brier_values.append(
+                    (conditional_over - actual_over) ** 2
+                )
+            ev_over = expected_value(p_over, p_under, over_price)
+            ev_under = expected_value(p_under, p_over, under_price)
+            side = (
+                "OVER"
+                if (ev_over if ev_over is not None else -99)
+                >= (ev_under if ev_under is not None else -99)
+                else "UNDER"
+            )
+            price = over_price if side == "OVER" else under_price
+            result = grade_total(record["actual_total"], line, side)
+            profit = american_profit(price) or 0.0
+            total_roi_values.append(
+                profit
+                if result == "WIN"
+                else -1.0
+                if result == "LOSS"
+                else 0.0
+            )
+
+        home_spread = market.get("home_spread")
+        away_spread = market.get("away_spread")
+        home_price = market.get("home_price")
+        away_price = market.get("away_price")
+        if (
+            home_spread is None
+            or away_spread is None
+            or home_price is None
+            or away_price is None
+        ):
+            continue
+        margin_samples = np.rint(
+            np.clip(margin_pred[idx] + residual_margin, -20, 20)
+        )
+        home_adjusted = margin_samples + float(home_spread)
+        away_adjusted = -margin_samples + float(away_spread)
+        p_home = float(np.mean(home_adjusted > 0))
+        p_home_loss = float(np.mean(home_adjusted < 0))
+        p_away = float(np.mean(away_adjusted > 0))
+        p_away_loss = float(np.mean(away_adjusted < 0))
+        actual_home_adjusted = (
+            record["home_margin"] + float(home_spread)
+        )
+        if not math.isclose(actual_home_adjusted, 0.0, abs_tol=1e-9):
+            actual_home_cover = float(actual_home_adjusted > 0)
+            conditional_home = p_home / max(p_home + p_home_loss, 1e-9)
+            spread_brier_values.append(
+                (conditional_home - actual_home_cover) ** 2
+            )
+        ev_home = expected_value(p_home, p_home_loss, home_price)
+        ev_away = expected_value(p_away, p_away_loss, away_price)
+        if (
+            (ev_home if ev_home is not None else -99)
+            >= (ev_away if ev_away is not None else -99)
+        ):
+            side, point, price = "HOME", home_spread, home_price
+        else:
+            side, point, price = "AWAY", away_spread, away_price
+        result = grade_spread(record["home_margin"], side, point)
+        profit = american_profit(price) or 0.0
+        spread_roi_values.append(
+            profit
+            if result == "WIN"
+            else -1.0
+            if result == "LOSS"
+            else 0.0
+        )
+    return {
+        "total_market_rows": len(total_roi_values),
+        "total_brier": (
+            float(np.mean(total_brier_values))
+            if total_brier_values else None
+        ),
+        "total_naive_selection_roi": (
+            float(np.mean(total_roi_values))
+            if total_roi_values else None
+        ),
+        "spread_market_rows": len(spread_roi_values),
+        "spread_brier": (
+            float(np.mean(spread_brier_values))
+            if spread_brier_values else None
+        ),
+        "spread_naive_selection_roi": (
+            float(np.mean(spread_roi_values))
+            if spread_roi_values else None
+        ),
+    }
+
+
+def train_models(records, model_path=MODEL_PATH):
+    """Train only on chronological, pregame feature records."""
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+    if records is None:
+        raise ValueError("Historical records are required; synthetic training is disabled")
+    clean = [
+        row for row in records
+        if row.get("features") is not None
+        and len(row["features"]) == len(FEATURE_NAMES)
+        and row.get("date")
+        and row.get("actual_total") is not None
+        and row.get("home_margin") is not None
+    ]
+    clean.sort(key=lambda row: str(row["date"]))
+    if len(clean) < 500:
+        raise ValueError(
+            f"At least 500 chronological games are required, got {len(clean)}"
+        )
+
+    X = np.asarray([row["features"] for row in clean], dtype=float)
+    y_total = np.asarray([row["actual_total"] for row in clean], dtype=float)
+    y_margin = np.asarray([row["home_margin"] for row in clean], dtype=float)
+    sample_weight = np.asarray(
+        [max(_safe_float(row.get("sample_weight"), 1.0), 0.05) for row in clean]
+    )
+    train_end = max(int(len(clean) * 0.65), 1)
+    calibration_end = max(int(len(clean) * 0.80), train_end + 1)
+    calibration_end = min(calibration_end, len(clean) - 1)
+    train_slice = slice(0, train_end)
+    calibration_slice = slice(train_end, calibration_end)
+    test_slice = slice(calibration_end, len(clean))
+
+    total_models = _make_regressors(42)
+    margin_models = _make_regressors(142)
+    for model in total_models.values():
+        _fit_regressor(
+            model, X[train_slice], y_total[train_slice],
+            sample_weight[train_slice],
+        )
+    for model in margin_models.values():
+        _fit_regressor(
+            model, X[train_slice], y_margin[train_slice],
+            sample_weight[train_slice],
+        )
+
+    total_cal_matrix = _prediction_matrix(total_models, X[calibration_slice])
+    margin_cal_matrix = _prediction_matrix(margin_models, X[calibration_slice])
+    total_weights = _weights_from_calibration(
+        total_cal_matrix, y_total[calibration_slice]
+    )
+    margin_weights = _weights_from_calibration(
+        margin_cal_matrix, y_margin[calibration_slice]
+    )
+    total_cal_pred = _ensemble(total_cal_matrix, total_weights)
+    margin_cal_pred = _ensemble(margin_cal_matrix, margin_weights)
+    residual_pairs = np.column_stack([
+        y_total[calibration_slice] - total_cal_pred,
+        y_margin[calibration_slice] - margin_cal_pred,
+    ])
+
+    total_test_matrix = _prediction_matrix(total_models, X[test_slice])
+    margin_test_matrix = _prediction_matrix(margin_models, X[test_slice])
+    total_test_pred = _ensemble(total_test_matrix, total_weights)
+    margin_test_pred = _ensemble(margin_test_matrix, margin_weights)
+    metrics = {
+        "total_mae": float(mean_absolute_error(
+            y_total[test_slice], total_test_pred
+        )),
+        "total_rmse": float(mean_squared_error(
+            y_total[test_slice], total_test_pred
+        ) ** 0.5),
+        "margin_mae": float(mean_absolute_error(
+            y_margin[test_slice], margin_test_pred
+        )),
+        "margin_rmse": float(mean_squared_error(
+            y_margin[test_slice], margin_test_pred
+        ) ** 0.5),
+    }
+    metrics.update(_market_test_metrics(
+        clean[calibration_end:],
+        total_test_pred,
+        margin_test_pred,
+        residual_pairs,
+    ))
+
+    bundle = {
+        "version": MODEL_VERSION,
+        "feature_names": FEATURE_NAMES,
+        "models_total": total_models,
+        "models_margin": margin_models,
+        "weights_total": dict(zip(total_models.keys(), total_weights)),
+        "weights_margin": dict(zip(margin_models.keys(), margin_weights)),
+        "residual_pairs": residual_pairs,
+        "train_rows": train_end,
+        "calibration_rows": calibration_end - train_end,
+        "test_rows": len(clean) - calibration_end,
+        "train_start": str(clean[0]["date"]),
+        "train_end": str(clean[train_end - 1]["date"]),
+        "calibration_end": str(clean[calibration_end - 1]["date"]),
+        "test_end": str(clean[-1]["date"]),
+        "metrics": metrics,
+    }
+    model_path = Path(model_path)
+    temporary_path = model_path.with_suffix(".tmp")
+    with temporary_path.open("wb") as handle:
+        pickle.dump(bundle, handle)
+    os.replace(temporary_path, model_path)
+    return bundle
+
+
+def load_models(model_path=MODEL_PATH):
+    model_path = Path(model_path)
+    if not model_path.exists():
+        return None
+    try:
+        with model_path.open("rb") as handle:
+            bundle = pickle.load(handle)
+        if (
+            bundle.get("version") != MODEL_VERSION
+            or tuple(bundle.get("feature_names", ())) != FEATURE_NAMES
+            or "models_margin" not in bundle
+            or "residual_pairs" not in bundle
+        ):
+            return None
+        return bundle
+    except Exception as exc:
+        print(f"Model load error: {exc}")
         return None
 
-    f = np.array(features).reshape(1, -1)
-    try:
-        f_scaled = scaler.transform(f)
-    except Exception:
-        train_models()
-        models_total, models_runline, scaler, cal_t, cal_r = load_models()
-        f_scaled = scaler.transform(f)
 
-    # Ensemble predictions with calibration
-    total_prob, total_yes, total_no, total_count = ensemble_predict(
-        models_total, f_scaled, cal_t)
-    rl_prob, rl_yes, rl_no, rl_count = ensemble_predict(
-        models_runline, f_scaled, cal_r)
-
-    # Monte Carlo simulation
-    mc = monte_carlo_simulate(context, total)
-    mc_std = mc.get("mc_std", 3.0)
-
-    # Poisson O/U probability
-    poisson_prob = poisson_total_prob(context, total)
-
-    # Implied total
+def _baseline_means(context):
     hs = context.get("home_stats") or {}
-    as_ = context.get("away_stats") or {}
+    away_stats = context.get("away_stats") or {}
     hf = context.get("home_form") or {}
     af = context.get("away_form") or {}
-    park_factor = float(context.get("park_factor", 1.0))
-    weather_factor = float(
-        (context.get("weather") or {}).get("weather_factor", 1.0))
+    park = _safe_float(context.get("park_factor"), 1.0)
+    weather = _safe_float(
+        (context.get("weather") or {}).get("weather_factor"), 1.0
+    )
+    home_for = (
+        0.65 * _safe_float(hf.get("ema_rpg"), hs.get("rpg", LEAGUE_AVG_RPG))
+        + 0.35 * _safe_float(hs.get("rpg"), LEAGUE_AVG_RPG)
+    )
+    away_for = (
+        0.65 * _safe_float(
+            af.get("ema_rpg"), away_stats.get("rpg", LEAGUE_AVG_RPG)
+        )
+        + 0.35 * _safe_float(away_stats.get("rpg"), LEAGUE_AVG_RPG)
+    )
+    total_mean = np.clip((home_for + away_for) * park * weather, 3.0, 18.0)
+    home_ra = _safe_float(
+        hf.get("ema_ra9"), hs.get("ra9", hs.get("team_era", 4.5))
+    )
+    away_ra = _safe_float(
+        af.get("ema_ra9"),
+        away_stats.get("ra9", away_stats.get("team_era", 4.5)),
+    )
+    margin_mean = np.clip(
+        ((home_for - away_for) + (away_ra - home_ra)) / 2.0 + 0.15,
+        -8.0, 8.0,
+    )
+    return float(total_mean), float(margin_mean)
 
-    home_rpg = float(hs.get("rpg", 4.5))
-    away_rpg = float(as_.get("rpg", 4.5))
-    home_recent = float(hf.get("recent_rpg", home_rpg))
-    away_recent = float(af.get("recent_rpg", away_rpg))
 
-    impl_season = (home_rpg + away_rpg) * park_factor * weather_factor
-    impl_recent = (home_recent + away_recent) * park_factor * weather_factor
-    implied_total = 0.6 * impl_recent + 0.4 * impl_season
-    implied_total = max(3.0, min(implied_total, 20.0))
-    our_total = round(implied_total, 1)
-    vegas_line = total if total else LEAGUE_AVG_TOTAL
-    total_gap = round(our_total - vegas_line, 1)
+def _predict_bundle(bundle, features):
+    X = np.asarray(features, dtype=float).reshape(1, -1)
+    total_names = list(bundle["models_total"])
+    margin_names = list(bundle["models_margin"])
+    total_predictions = np.asarray([
+        float(bundle["models_total"][name].predict(X)[0])
+        for name in total_names
+    ])
+    margin_predictions = np.asarray([
+        float(bundle["models_margin"][name].predict(X)[0])
+        for name in margin_names
+    ])
+    total_weights = np.asarray([
+        bundle["weights_total"][name] for name in total_names
+    ])
+    margin_weights = np.asarray([
+        bundle["weights_margin"][name] for name in margin_names
+    ])
+    total_mean = float(total_predictions @ total_weights)
+    margin_mean = float(margin_predictions @ margin_weights)
+    residual_pairs = np.asarray(bundle["residual_pairs"], dtype=float)
+    return {
+        "total_mean": total_mean,
+        "margin_mean": margin_mean,
+        "total_predictions": total_predictions,
+        "margin_predictions": margin_predictions,
+        "total_samples": np.rint(np.clip(
+            total_mean + residual_pairs[:, 0], 0.0, 30.0
+        )),
+        "margin_samples": np.rint(np.clip(
+            margin_mean + residual_pairs[:, 1], -20.0, 20.0
+        )),
+    }
 
-    # MC vs formula agreement check
-    mc_formula_diff = abs(implied_total - mc["simulated_avg_total"])
 
-    # Blend total_prob with poisson for better O/U
-    blended_over_prob = (total_prob * 0.5 + poisson_prob * 0.3 +
-                         mc["over_prob"] * 0.2)
+def _extract_markets(total, run_line, odds_entry):
+    odds_entry = odds_entry or {}
+    total_market = dict(odds_entry.get("total_market") or {})
+    spread_market = dict(odds_entry.get("spread_market") or {})
+    if total_market.get("point") is None:
+        total_market["point"] = (
+            total if total is not None else odds_entry.get("total")
+        )
+    total_market.setdefault("over_price", odds_entry.get("over_price"))
+    total_market.setdefault("under_price", odds_entry.get("under_price"))
+    if spread_market.get("home_point") is None:
+        spread_market["home_point"] = (
+            run_line if run_line is not None else odds_entry.get("run_line")
+        )
+    if (
+        spread_market.get("away_point") is None
+        and spread_market.get("home_point") is not None
+    ):
+        spread_market["away_point"] = -float(spread_market["home_point"])
+    spread_market.setdefault("home_price", odds_entry.get("home_price"))
+    spread_market.setdefault("away_price", odds_entry.get("away_price"))
+    return total_market, spread_market
 
-    if total_gap > 0:
-        total_pred = "OVER"
-        total_votes = total_yes
-        total_conf = round(blended_over_prob * 100, 1)
+
+def _probability_parts(wins, pushes):
+    p_win = float(np.mean(wins))
+    p_push = float(np.mean(pushes))
+    p_loss = max(0.0, 1.0 - p_win - p_push)
+    conditional = p_win / max(p_win + p_loss, 1e-9)
+    return p_win, p_loss, p_push, conditional
+
+
+def _select_total(total_samples, model_predictions, market):
+    line = market.get("point")
+    if line is None:
+        return None
+    line = float(line)
+    over = _probability_parts(total_samples > line, total_samples == line)
+    under = _probability_parts(total_samples < line, total_samples == line)
+    over_price = market.get("over_price")
+    under_price = market.get("under_price")
+    consensus_over = market.get("consensus_over_prob")
+    consensus_under = market.get("consensus_under_prob")
+    if consensus_over is None or consensus_under is None:
+        consensus_over, consensus_under = no_vig_probabilities(
+            over_price, under_price
+        )
+    candidates = []
+    for side, parts, price, market_prob in (
+        ("OVER", over, over_price, consensus_over),
+        ("UNDER", under, under_price, consensus_under),
+    ):
+        p_win, p_loss, p_push, conditional = parts
+        ev = expected_value(p_win, p_loss, price)
+        edge = conditional - market_prob if market_prob is not None else None
+        agreement = float(
+            np.mean(model_predictions > line)
+            if side == "OVER" else np.mean(model_predictions < line)
+        )
+        candidates.append({
+            "side": side, "line": line, "price": price,
+            "p_win": p_win, "p_loss": p_loss, "p_push": p_push,
+            "conditional_prob": conditional, "market_prob": market_prob,
+            "probability_edge": edge, "ev": ev, "agreement": agreement,
+        })
+    return max(
+        candidates,
+        key=lambda item: item["ev"] if item["ev"] is not None else -99,
+    )
+
+
+def _select_spread(margin_samples, model_predictions, market):
+    home_point = market.get("home_point")
+    away_point = market.get("away_point")
+    if home_point is None or away_point is None:
+        return None
+    home_point = float(home_point)
+    away_point = float(away_point)
+    home_adjusted = margin_samples + home_point
+    away_adjusted = -margin_samples + away_point
+    home = _probability_parts(home_adjusted > 0, home_adjusted == 0)
+    away = _probability_parts(away_adjusted > 0, away_adjusted == 0)
+    home_price = market.get("home_price")
+    away_price = market.get("away_price")
+    consensus_home = market.get("consensus_home_prob")
+    consensus_away = market.get("consensus_away_prob")
+    if consensus_home is None or consensus_away is None:
+        consensus_home, consensus_away = no_vig_probabilities(
+            home_price, away_price
+        )
+    candidates = []
+    for side, point, parts, price, market_prob in (
+        ("HOME", home_point, home, home_price, consensus_home),
+        ("AWAY", away_point, away, away_price, consensus_away),
+    ):
+        p_win, p_loss, p_push, conditional = parts
+        ev = expected_value(p_win, p_loss, price)
+        edge = conditional - market_prob if market_prob is not None else None
+        agreement = float(
+            np.mean(model_predictions + home_point > 0)
+            if side == "HOME"
+            else np.mean(-model_predictions + away_point > 0)
+        )
+        candidates.append({
+            "side": side, "point": point, "price": price,
+            "p_win": p_win, "p_loss": p_loss, "p_push": p_push,
+            "conditional_prob": conditional, "market_prob": market_prob,
+            "probability_edge": edge, "ev": ev, "agreement": agreement,
+        })
+    return max(
+        candidates,
+        key=lambda item: item["ev"] if item["ev"] is not None else -99,
+    )
+
+
+def _bet_size(selection, flagged):
+    if not flagged or not selection:
+        return "SKIP", 0.0
+    from config import KELLY_FRACTION, MAX_BET_FRACTION
+    fraction = quarter_kelly(
+        selection["p_win"], selection["p_loss"], selection["price"],
+        KELLY_FRACTION, MAX_BET_FRACTION,
+    )
+    return (
+        ("FULL", fraction)
+        if fraction >= MAX_BET_FRACTION * 0.75
+        else ("HALF", fraction)
+    )
+
+
+def predict_game(context, total=None, run_line=None, odds_entry=None):
+    from config import (
+        MAX_ENSEMBLE_STD_MARGIN,
+        MAX_ENSEMBLE_STD_TOTAL,
+        MIN_DATA_QUALITY,
+        MIN_EXPECTED_VALUE,
+        MIN_MODEL_AGREEMENT,
+        MIN_PROBABILITY_EDGE,
+    )
+
+    features = build_features(context)
+    if features is None:
+        return None
+    bundle = load_models()
+    model_ready = bundle is not None
+    if model_ready:
+        prediction = _predict_bundle(bundle, features)
+        model_version = bundle["version"]
+        model_metrics = bundle.get("metrics", {})
     else:
-        total_pred = "UNDER"
-        total_votes = total_no
-        total_conf = round((1 - blended_over_prob) * 100, 1)
+        total_mean, margin_mean = _baseline_means(context)
+        prediction = {
+            "total_mean": total_mean,
+            "margin_mean": margin_mean,
+            "total_predictions": np.asarray([total_mean]),
+            "margin_predictions": np.asarray([margin_mean]),
+            "total_samples": np.asarray([]),
+            "margin_samples": np.asarray([]),
+        }
+        model_version = "UNTRAINED"
+        model_metrics = {}
 
-    # Run line direction
-    home_is_fav = (run_line or -1.5) < 0
-    if rl_prob > 0.5:
-        rl_pred = "HOME -1.5" if home_is_fav else "HOME +1.5"
-        rl_votes = rl_yes
+    total_market, spread_market = _extract_markets(
+        total, run_line, odds_entry
+    )
+    total_selection = (
+        _select_total(
+            prediction["total_samples"],
+            prediction["total_predictions"],
+            total_market,
+        ) if model_ready else None
+    )
+    spread_selection = (
+        _select_spread(
+            prediction["margin_samples"],
+            prediction["margin_predictions"],
+            spread_market,
+        ) if model_ready else None
+    )
+    total_ensemble_std = float(np.std(prediction["total_predictions"]))
+    margin_ensemble_std = float(np.std(prediction["margin_predictions"]))
+    data_quality = _derive_data_quality(context)
+    pitchers_ready = bool(context.get("has_real_pitchers"))
+
+    def is_actionable(selection, ensemble_std, max_std):
+        return bool(
+            model_ready and selection
+            and selection.get("price") is not None
+            and selection.get("ev") is not None
+            and selection["ev"] >= MIN_EXPECTED_VALUE
+            and selection.get("probability_edge") is not None
+            and selection["probability_edge"] >= MIN_PROBABILITY_EDGE
+            and selection["agreement"] >= MIN_MODEL_AGREEMENT
+            and ensemble_std <= max_std
+            and data_quality >= MIN_DATA_QUALITY
+            and pitchers_ready
+        )
+
+    edge_flagged = is_actionable(
+        total_selection, total_ensemble_std, MAX_ENSEMBLE_STD_TOTAL
+    )
+    rl_edge_flagged = is_actionable(
+        spread_selection, margin_ensemble_std, MAX_ENSEMBLE_STD_MARGIN
+    )
+    total_bet_size, total_kelly = _bet_size(total_selection, edge_flagged)
+    rl_bet_size, rl_kelly = _bet_size(spread_selection, rl_edge_flagged)
+    total_line = total_market.get("point")
+    home_win_prob = (
+        float(
+            np.mean(prediction["margin_samples"] > 0)
+            + 0.5 * np.mean(prediction["margin_samples"] == 0)
+        ) if model_ready else None
+    )
+    total_pred = total_selection["side"] if total_selection else "NO BET"
+    total_conf = (
+        round(total_selection["conditional_prob"] * 100, 1)
+        if total_selection else 0.0
+    )
+    total_votes = (
+        int(round(
+            total_selection["agreement"]
+            * len(prediction["total_predictions"])
+        )) if total_selection else 0
+    )
+    if spread_selection:
+        rl_pred = f"{spread_selection['side']} {spread_selection['point']:+g}"
+        rl_conf = round(spread_selection["conditional_prob"] * 100, 1)
+        rl_votes = int(round(
+            spread_selection["agreement"]
+            * len(prediction["margin_predictions"])
+        ))
     else:
-        rl_pred = "AWAY +1.5" if home_is_fav else "AWAY -1.5"
-        rl_votes = rl_no
-    rl_conf = round(max(rl_prob, 1 - rl_prob) * 100, 1)
-
-    from config import (MIN_CONFIDENCE, RL_MIN_CONFIDENCE, MIN_MODELS_AGREE,
-                        EDGE_THRESHOLD, MC_STD_MAX, MC_FORMULA_MAX_DIFF,
-                        BET_CONFIDENCE, FULL_BET_CONFIDENCE)
-
-    # V2 CONVERGENCE FILTER — all signals must agree
-    mc_agrees_with_pred = (
-        (total_pred == "OVER" and mc["over_prob"] > 0.50) or
-        (total_pred == "UNDER" and mc["over_prob"] < 0.50)
+        rl_pred, rl_conf, rl_votes = "NO BET", 0.0, 0
+    total_gap = (
+        prediction["total_mean"] - float(total_line)
+        if total_line is not None else None
     )
-    poisson_agrees = (
-        (total_pred == "OVER" and poisson_prob > 0.50) or
-        (total_pred == "UNDER" and poisson_prob < 0.50)
+    predictive_total_std = (
+        float(np.std(prediction["total_samples"])) if model_ready else None
     )
-
-    # O/U edge — all three signals must converge
-    edge_flagged = (
-        abs(total_gap) >= EDGE_THRESHOLD and
-        total_votes >= MIN_MODELS_AGREE and
-        total_conf >= MIN_CONFIDENCE and
-        mc_agrees_with_pred and          # MC agrees
-        poisson_agrees and               # Poisson agrees
-        mc_std <= MC_STD_MAX and         # Low variance game
-        mc_formula_diff <= MC_FORMULA_MAX_DIFF and  # Formula ≈ MC
-        context.get("has_real_pitchers", False)      # Confirmed starters
-    )
-
-    # RL edge
-    rl_edge_flagged = (
-        rl_votes >= MIN_MODELS_AGREE and
-        rl_conf >= RL_MIN_CONFIDENCE and
-        mc_std <= MC_STD_MAX             # Low variance game
-    )
-
-    # Confidence bands for bet sizing
-    if rl_conf >= FULL_BET_CONFIDENCE:
-        bet_size = "FULL"
-    elif rl_conf >= BET_CONFIDENCE:
-        bet_size = "HALF"
-    else:
-        bet_size = "SKIP"
 
     return {
-        "our_total": our_total,
-        "total_gap": total_gap,
+        "model_ready": model_ready,
+        "model_version": model_version,
+        "model_metrics": model_metrics,
+        "feature_count": len(features),
+        "data_quality": round(data_quality, 3),
+        "our_total": round(prediction["total_mean"], 2),
+        "our_home_margin": round(prediction["margin_mean"], 2),
+        "total_gap": round(total_gap, 2) if total_gap is not None else None,
         "total_pred": total_pred,
+        "total_line": float(total_line) if total_line is not None else None,
+        "total_price": total_selection.get("price") if total_selection else None,
         "total_conf": total_conf,
+        "total_win_prob": (
+            round(total_selection["p_win"], 4) if total_selection else None
+        ),
+        "total_push_prob": (
+            round(total_selection["p_push"], 4) if total_selection else None
+        ),
+        "total_market_prob": (
+            round(total_selection["market_prob"], 4)
+            if total_selection and total_selection["market_prob"] is not None
+            else None
+        ),
+        "total_probability_edge": (
+            round(total_selection["probability_edge"], 4)
+            if total_selection
+            and total_selection["probability_edge"] is not None else None
+        ),
+        "total_ev": (
+            round(total_selection["ev"], 4)
+            if total_selection and total_selection["ev"] is not None else None
+        ),
         "total_votes": total_votes,
-        "total_models": total_count,
+        "total_models": (
+            len(prediction["total_predictions"]) if model_ready else 0
+        ),
+        "total_agreement": (
+            round(total_selection["agreement"], 3)
+            if total_selection else None
+        ),
+        "total_ensemble_std": round(total_ensemble_std, 3),
+        "predictive_total_std": (
+            round(predictive_total_std, 3)
+            if predictive_total_std is not None else None
+        ),
+        "total_bet_size": total_bet_size,
+        "total_kelly_fraction": round(total_kelly, 4),
         "rl_pred": rl_pred,
+        "rl_side": spread_selection.get("side") if spread_selection else None,
+        "rl_point": (
+            float(spread_selection["point"]) if spread_selection else None
+        ),
+        "rl_price": spread_selection.get("price") if spread_selection else None,
         "rl_conf": rl_conf,
+        "rl_win_prob": (
+            round(spread_selection["p_win"], 4)
+            if spread_selection else None
+        ),
+        "rl_push_prob": (
+            round(spread_selection["p_push"], 4)
+            if spread_selection else None
+        ),
+        "rl_market_prob": (
+            round(spread_selection["market_prob"], 4)
+            if spread_selection
+            and spread_selection["market_prob"] is not None else None
+        ),
+        "rl_probability_edge": (
+            round(spread_selection["probability_edge"], 4)
+            if spread_selection
+            and spread_selection["probability_edge"] is not None else None
+        ),
+        "rl_ev": (
+            round(spread_selection["ev"], 4)
+            if spread_selection and spread_selection["ev"] is not None else None
+        ),
         "rl_votes": rl_votes,
-        "rl_models": rl_count,
-        "home_win_prob": round(mc["home_win_prob"], 3),
-        "away_win_prob": round(mc["away_win_prob"], 3),
-        "mc_avg_total": mc["simulated_avg_total"],
-        "mc_over_prob": mc["over_prob"],
-        "mc_std": mc_std,
-        "mc_formula_diff": round(mc_formula_diff, 2),
-        "poisson_over_prob": poisson_prob,
-        "mc_agrees": mc_agrees_with_pred,
-        "poisson_agrees": poisson_agrees,
+        "rl_models": (
+            len(prediction["margin_predictions"]) if model_ready else 0
+        ),
+        "rl_agreement": (
+            round(spread_selection["agreement"], 3)
+            if spread_selection else None
+        ),
+        "margin_ensemble_std": round(margin_ensemble_std, 3),
+        "rl_bet_size": rl_bet_size,
+        "rl_kelly_fraction": round(rl_kelly, 4),
+        "home_win_prob": (
+            round(home_win_prob, 4) if home_win_prob is not None else None
+        ),
+        "away_win_prob": (
+            round(1.0 - home_win_prob, 4)
+            if home_win_prob is not None else None
+        ),
         "edge_flagged": edge_flagged,
         "rl_edge_flagged": rl_edge_flagged,
-        "bet_size": bet_size,
-        "has_real_pitchers": context.get("has_real_pitchers", False),
+        "bet_size": (
+            "FULL" if "FULL" in (total_bet_size, rl_bet_size)
+            else "HALF" if "HALF" in (total_bet_size, rl_bet_size)
+            else "SKIP"
+        ),
+        "has_real_pitchers": pitchers_ready,
+        "quote_timestamp": (odds_entry or {}).get("quote_timestamp"),
+        "bookmaker_count": (odds_entry or {}).get("bookmaker_count", 0),
     }

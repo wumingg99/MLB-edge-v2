@@ -1,0 +1,8 @@
+APScheduler>=3.10,<4
+numpy>=2.0,<3
+python-dotenv>=1.0,<2
+python-telegram-bot>=21,<23
+pytz>=2024.1
+requests>=2.31,<3
+scikit-learn>=1.5,<2
+scipy>=1.13,<2
