@@ -92,59 +92,56 @@ def _ev(value):
 
 def format_summary(games_data, now):
     from data import _cache
-
     day_label = "tomorrow" if _cache.get("showing_next_day") else "today"
     edge_count = sum(
         1
         for _, prediction, _ in games_data
         if prediction
-        and (
-            prediction.get("edge_flagged")
-            or prediction.get("rl_edge_flagged")
-        )
+        and (prediction.get("edge_flagged") or prediction.get("rl_edge_flagged"))
     )
     model_ready = any(
         prediction and prediction.get("model_ready")
         for _, prediction, _ in games_data
     )
     message = (
-        f"MLB Edge V3 - {now}\n"
-        f"{len(games_data)} games {day_label} | {edge_count} bets\n"
+        f"⚾ MLB Edge V2 — {now}\n"
+        f"{len(games_data)} games {day_label} | {edge_count} bet(s)\n"
     )
     if not model_ready:
-        message += "MODEL NOT TRAINED - all markets forced to SKIP\n"
+        message += "⚠️ MODEL NOT TRAINED — all markets SKIP\n"
     tbd_count = sum(
         1
         for _, prediction, _ in games_data
         if prediction and not prediction.get("has_real_pitchers")
     )
     if tbd_count:
-        message += f"{tbd_count} games have unconfirmed starters\n"
+        message += f"⚠️ {tbd_count} game(s) have unconfirmed starters\n"
     if edge_count == 0:
-        return message + "\nNo price-positive edges."
-
-    message += "\nPrice-positive edges:\n"
+        return message + "\nNo price-positive edges today."
+    message += "\n💰 Price-Positive Edges:\n" + "━" * 20 + "\n"
     for game, prediction, _ in games_data:
         if not prediction or not (
-            prediction.get("edge_flagged")
-            or prediction.get("rl_edge_flagged")
+            prediction.get("edge_flagged") or prediction.get("rl_edge_flagged")
         ):
             continue
-        message += f"\n{game['away_team']} @ {game['home_team']}\n"
+        home = game["home_team"].split()[-1]
+        away = game["away_team"].split()[-1]
+        message += f"\n⚡ {away} @ {home}\n"
         if prediction.get("edge_flagged"):
+            size = prediction.get("total_bet_size", "")
+            emoji = "✅🔥" if size == "FULL" else "✅"
             message += (
-                f"  O/U: {prediction['total_pred']} "
-                f"{prediction.get('total_line')} "
-                f"{_price(prediction.get('total_price'))} | "
-                f"EV {_ev(prediction.get('total_ev'))} | "
-                f"{prediction.get('total_bet_size')}\n"
+                f"  O/U {prediction['total_pred']} {prediction.get('total_line')} "
+                f"({_price(prediction.get('total_price'))}) | "
+                f"EV {_ev(prediction.get('total_ev'))} {emoji} {size}\n"
             )
         if prediction.get("rl_edge_flagged"):
+            size = prediction.get("rl_bet_size", "")
+            emoji = "✅🔥" if size == "FULL" else "✅"
             message += (
-                f"  RL: {prediction['rl_pred']} "
-                f"{_price(prediction.get('rl_price'))} | "
-                f"EV {_ev(prediction.get('rl_ev'))} | "
-                f"{prediction.get('rl_bet_size')}\n"
+                f"  RL {prediction['rl_pred']} "
+                f"({_price(prediction.get('rl_price'))}) | "
+                f"EV {_ev(prediction.get('rl_ev'))} {emoji} {size}\n"
             )
     return message + "\nUse /v2_edge for full details."
 
@@ -153,64 +150,70 @@ def _format_detail(game, prediction):
     start = game.get("start_time_sgt", "")
     if start:
         try:
-            start = datetime.fromisoformat(start).strftime(
-                "%b %d %I:%M %p SGT"
-            )
+            start = datetime.fromisoformat(start).strftime("%b %d %I:%M %p SGT")
         except ValueError:
             pass
-    lines = [
-        f"{game['away_team']} @ {game['home_team']}",
-        f"{game.get('venue', '')} | {start}",
-        (
-            f"{game.get('away_pitcher', 'TBD')} vs "
-            f"{game.get('home_pitcher', 'TBD')}"
-        ),
-        (
-            f"Model: {prediction.get('model_version')} | "
-            f"data quality {prediction.get('data_quality')}"
-        ),
-        (
-            f"Expected total {prediction.get('our_total')} | "
-            f"home margin {prediction.get('our_home_margin'):+.2f}"
-        ),
-        (
-            f"O/U: {prediction.get('total_pred')} "
-            f"{prediction.get('total_line')} "
-            f"{_price(prediction.get('total_price'))}"
-        ),
-        (
-            f"  win {_pct(prediction.get('total_win_prob'))} | "
-            f"push {_pct(prediction.get('total_push_prob'))} | "
-            f"market {_pct(prediction.get('total_market_prob'))}"
-        ),
-        (
-            f"  edge {_pct(prediction.get('total_probability_edge'))} | "
-            f"EV {_ev(prediction.get('total_ev'))} | "
-            f"agreement {_pct(prediction.get('total_agreement'))} | "
-            f"{'BET' if prediction.get('edge_flagged') else 'SKIP'}"
-        ),
-        (
-            f"RL: {prediction.get('rl_pred')} "
-            f"{_price(prediction.get('rl_price'))}"
-        ),
-        (
-            f"  win {_pct(prediction.get('rl_win_prob'))} | "
-            f"push {_pct(prediction.get('rl_push_prob'))} | "
-            f"market {_pct(prediction.get('rl_market_prob'))}"
-        ),
-        (
-            f"  edge {_pct(prediction.get('rl_probability_edge'))} | "
-            f"EV {_ev(prediction.get('rl_ev'))} | "
-            f"agreement {_pct(prediction.get('rl_agreement'))} | "
-            f"{'BET' if prediction.get('rl_edge_flagged') else 'SKIP'}"
-        ),
-        (
-            f"Model spread: total "
-            f"{prediction.get('total_ensemble_std')} | margin "
-            f"{prediction.get('margin_ensemble_std')}"
-        ),
-    ]
-    return "\n".join(lines)
+
+    header = (
+        f"⚡ {game['away_team']} @ {game['home_team']}\n"
+        f"🏟 {game.get('venue', '')} | 🕐 {start}\n"
+        f"🎯 {game.get('away_pitcher', 'TBD')} vs {game.get('home_pitcher', 'TBD')}\n"
+        f"📊 Data quality: {_pct(prediction.get('data_quality'))} | "
+        f"Model: {prediction.get('model_version')}\n"
+    )
+
+    expected = (
+        f"\nExpected: total {prediction.get('our_total')} | "
+        f"margin {prediction.get('our_home_margin'):+.2f}\n"
+    )
+
+    ou_bet = prediction.get("edge_flagged")
+    ou_size = prediction.get("total_bet_size", "SKIP")
+    if ou_size == "FULL":
+        ou_emoji = "✅🔥"
+    elif ou_bet:
+        ou_emoji = "✅"
+    else:
+        ou_emoji = "⏭"
+    ou_block = (
+        f"\nO/U {prediction.get('total_pred')} {prediction.get('total_line')} "
+        f"({_price(prediction.get('total_price'))})\n"
+        f"  Win {_pct(prediction.get('total_win_prob'))} | "
+        f"Market {_pct(prediction.get('total_market_prob'))} | "
+        f"Edge {_pct(prediction.get('total_probability_edge'))}\n"
+        f"  EV {_ev(prediction.get('total_ev'))} | "
+        f"Agreement {_pct(prediction.get('total_agreement'))} | "
+        f"{ou_emoji} {'BET ' + ou_size if ou_bet else 'SKIP'}\n"
+    )
+
+    rl_bet = prediction.get("rl_edge_flagged")
+    rl_size = prediction.get("rl_bet_size", "SKIP")
+    if rl_size == "FULL":
+        rl_emoji = "✅🔥"
+    elif rl_bet:
+        rl_emoji = "✅"
+    else:
+        rl_emoji = "⏭"
+    rl_block = (
+        f"\nRL {prediction.get('rl_pred')} "
+        f"({_price(prediction.get('rl_price'))})\n"
+        f"  Win {_pct(prediction.get('rl_win_prob'))} | "
+        f"Market {_pct(prediction.get('rl_market_prob'))} | "
+        f"Edge {_pct(prediction.get('rl_probability_edge'))}\n"
+        f"  EV {_ev(prediction.get('rl_ev'))} | "
+        f"Agreement {_pct(prediction.get('rl_agreement'))} | "
+        f"{rl_emoji} {'BET ' + rl_size if rl_bet else 'SKIP'}\n"
+    )
+
+    footer = (
+        f"\nModel std: total {prediction.get('total_ensemble_std')} | "
+        f"margin {prediction.get('margin_ensemble_std')}\n"
+        + "━" * 20
+    )
+
+    return header + expected + ou_block + rl_block + footer
+
+
 
 
 async def cmd_v2_brief(
@@ -218,7 +221,7 @@ async def cmd_v2_brief(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("Loading V3 markets...")
+    await update.message.reply_text("⏳ Loading V2 edges...")
     _, games_data = await fetch_all_games(ODDS_API_KEY)
     if not games_data:
         await update.message.reply_text("No MLB games available.")
@@ -232,7 +235,7 @@ async def cmd_v2_edge(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("Fetching V3 price-positive edges...")
+    await update.message.reply_text("⏳ Fetching V2 edges...")
     _, games_data = await fetch_all_games(ODDS_API_KEY)
     edges = [
         (game, prediction)
@@ -249,13 +252,13 @@ async def cmd_v2_edge(
             for _, prediction, _ in games_data
         )
         reason = (
-            "No trained V3 model is installed."
+            "⚠️ No trained V2 model is installed."
             if not model_ready
             else "No markets clear the EV and uncertainty filters."
         )
         await update.message.reply_text(reason)
         return
-    message = "MLB Edge V3 - full details\n\n"
+    message = "⚾ MLB Edge V2 — full details\n\n"
     message += "\n\n".join(
         _format_detail(game, prediction)
         for game, prediction in edges
@@ -283,7 +286,7 @@ async def cmd_v2_refresh(
         )
     )
     await update.message.reply_text(
-        f"V3 refreshed: {len(games)} games, {edge_count} bets."
+        f"✅ V2 refreshed: {len(games)} games, {edge_count} bets."
     )
 
 
@@ -292,7 +295,7 @@ async def cmd_v2_results(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("Fetching V3 results...")
+    await update.message.reply_text("⏳ Fetching V2 results...")
     try:
         from sheets import (
             get_results_date,
@@ -308,7 +311,7 @@ async def cmd_v2_results(
             return
         update_results_in_sheet(results, date_override=results_date)
         predictions = get_stored_predictions(results_date)
-        lines = [f"V3 Results - {results_date}"]
+        lines = [f"⚾ MLB Edge V2 — Results {results_date}"]
         for result in results:
             prediction = predictions.get(result["game"])
             if not prediction or not (
@@ -349,10 +352,10 @@ async def cmd_v2_record(
 
         record = get_record()
         if not record or not record.get("settled_bets"):
-            await update.message.reply_text("No settled V3 bets yet.")
+            await update.message.reply_text("No settled V2 bets yet.")
             return
         message = (
-            "MLB Edge V3 Record\n"
+            "⚾ MLB Edge V2 Record\n"
             f"Settled bets: {record['settled_bets']}\n"
             f"Pushes: {record['pushes']}\n"
             f"W-L: {record['wins']}-{record['losses']}\n"
@@ -387,7 +390,7 @@ async def cmd_v2_status(
         model_line = "MODEL NOT TRAINED - betting disabled"
         metric_line = "Run: python historical.py"
     await update.message.reply_text(
-        "MLB Edge V3\n"
+        "⚾ MLB Edge V2\n"
         f"{datetime.now(tz).strftime('%b %d %Y %H:%M SGT')}\n"
         f"Games loaded: {len(cached)}\n"
         f"{model_line}\n"
@@ -396,7 +399,7 @@ async def cmd_v2_status(
 
 
 def main():
-    print("Starting MLB Edge V3 Bot...")
+    print("Starting MLB Edge V2 Bot...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("v2_brief", cmd_v2_brief))
     app.add_handler(CommandHandler("v2_edge", cmd_v2_edge))
@@ -412,7 +415,7 @@ def main():
     async def post_init(application):
         del application
         scheduler.start()
-        print("V3 scheduler started")
+        print("V2 scheduler started")
         import threading
 
         thread = threading.Thread(

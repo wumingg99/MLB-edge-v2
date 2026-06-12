@@ -97,7 +97,13 @@ async def evening_results(app):
 
 
 def setup_scheduler(app):
-    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler = AsyncIOScheduler(
+        timezone=tz,
+        job_defaults={
+            "misfire_grace_time": 3600,
+            "coalesce": True,
+        }
+    )
     for hour in (23, 1, 6, 10):
         scheduler.add_job(
             scheduled_brief,
