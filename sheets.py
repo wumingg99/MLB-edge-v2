@@ -13,7 +13,7 @@ from model import american_profit, grade_spread, grade_total
 load_dotenv()
 SHEETS_URL = os.getenv("SHEETS_URL", "")
 SHEETS_SECRET = os.getenv("SHEETS_SECRET", "")
-SHEET_NAME = os.getenv("SHEET_NAME", "predictions_v3")
+SHEET_NAME = os.getenv("SHEET_NAME", "predictions_v2")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Singapore")
 tz = pytz.timezone(TIMEZONE)
 AUDIT_PATH = Path(__file__).with_name("prediction_audit.jsonl")
