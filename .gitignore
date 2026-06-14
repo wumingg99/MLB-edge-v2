@@ -3,9 +3,9 @@ __pycache__/
 *.pyc
 *.pkl
 *.log
+*.db
+*.bak
 .env
 cache/
-historical_dataset.jsonl
+*.jsonl
 historical_odds.csv
-prediction_audit.jsonl
-result_audit.jsonl

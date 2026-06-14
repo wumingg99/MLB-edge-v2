@@ -29,7 +29,7 @@ async def check_new_lines(app):
         _, games_data = await fetch_all_games(
             ODDS_API_KEY, force_refresh=True
         )
-        edges = [
+        new_edges = [
             item
             for item in games_data
             if item[1]
@@ -37,8 +37,9 @@ async def check_new_lines(app):
                 item[1].get("edge_flagged")
                 or item[1].get("rl_edge_flagged")
             )
+            and item[1].get("_newly_logged")
         ]
-        if edges:
+        if new_edges:
             now = datetime.now(tz).strftime("%b %d, %Y %H:%M SGT")
             await send_message(app, format_summary(games_data, now))
     except Exception as exc:

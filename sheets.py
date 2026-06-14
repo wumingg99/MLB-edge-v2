@@ -622,3 +622,88 @@ def get_record():
     except Exception as exc:
         print(f"Error getting record: {exc}")
         return None
+
+
+def grade_user_bets(date, results):
+    """Grade pending mlb_v2 user_bets rows for given date using results list."""
+    if not SHEETS_URL:
+        return []
+    from model import grade_total, grade_spread
+    try:
+        r = requests.get(SHEETS_URL, params={"sheet": "user_bets"}, timeout=30)
+        rows = r.json().get("rows", [])
+    except Exception as exc:
+        print(f"Error reading user_bets: {exc}")
+        return []
+    if not rows:
+        return []
+    graded = []
+    for row in rows[1:]:
+        if len(row) < 6:
+            continue
+        row_date, sport, home_team, away_team, market, pick = row[0], row[1], row[2], row[3], row[4], row[5]
+        existing_result = row[8] if len(row) > 8 else ""
+        if sport != "mlb_v2" or str(row_date)[:10] != date or existing_result:
+            continue
+        match = next((res for res in results
+                       if away_team in res["game"] and home_team in res["game"]), None)
+        if not match:
+            continue
+        home_margin = match["home_score"] - match["away_score"]
+        try:
+            if market.upper() == "OU":
+                direction, line = pick.split()
+                outcome = grade_total(match["total_result"], float(line), direction.upper())
+            else:
+                side, point = pick.split()
+                outcome = grade_spread(home_margin, side.upper(), float(point))
+        except Exception:
+            continue
+        payload = {
+            "secret": SHEETS_SECRET, "action": "update_user_bet", "sheet": "user_bets",
+            "date": row_date, "sport": sport, "home_team": home_team, "away_team": away_team,
+            "market": market, "pick": pick,
+            "result": outcome, "home_score": match["home_score"],
+            "away_score": match["away_score"], "total_result": match["total_result"],
+            "home_margin": home_margin
+        }
+        try:
+            requests.post(SHEETS_URL, json=payload, timeout=30)
+            graded.append((away_team, home_team, market, pick, outcome))
+        except Exception as exc:
+            print(f"Error grading user bet: {exc}")
+    return graded
+
+
+def get_user_bets(sport="mlb_v2", days=None):
+    """Return user_bets rows for given sport. If days is None, return all."""
+    if not SHEETS_URL:
+        return []
+    try:
+        r = requests.get(SHEETS_URL, params={"sheet": "user_bets"}, timeout=30)
+        rows = r.json().get("rows", [])
+    except Exception as exc:
+        print(f"Error reading user_bets: {exc}")
+        return []
+    if not rows:
+        return []
+    out = [row for row in rows[1:] if len(row) >= 6 and row[1] == sport]
+    if days is None:
+        return out
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    return [row for row in out if str(row[0])[:10] >= cutoff]
+
+
+def units_won(hk_odds, stake, result):
+    """HK odds: profit = stake * hk_odds on WIN, -stake on LOSS, 0 on PUSH."""
+    try:
+        hk_odds = float(hk_odds)
+        stake = float(stake)
+    except (TypeError, ValueError):
+        return 0.0
+    if result == "WIN":
+        return stake * hk_odds
+    if result == "LOSS":
+        return -stake
+    return 0.0

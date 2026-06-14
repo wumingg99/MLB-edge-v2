@@ -596,11 +596,20 @@ def train_models(records, model_path=MODEL_PATH):
     return bundle
 
 
+_MODEL_BUNDLE_CACHE = {"bundle": None, "mtime": None, "path": None}
+
+
 def load_models(model_path=MODEL_PATH):
     model_path = Path(model_path)
     if not model_path.exists():
         return None
     try:
+        mtime = model_path.stat().st_mtime
+        cache = _MODEL_BUNDLE_CACHE
+        if (cache["bundle"] is not None
+                and cache["mtime"] == mtime
+                and cache["path"] == str(model_path)):
+            return cache["bundle"]
         with model_path.open("rb") as handle:
             bundle = pickle.load(handle)
         if (
@@ -610,6 +619,9 @@ def load_models(model_path=MODEL_PATH):
             or "residual_pairs" not in bundle
         ):
             return None
+        cache["bundle"] = bundle
+        cache["mtime"] = mtime
+        cache["path"] = str(model_path)
         return bundle
     except Exception as exc:
         print(f"Model load error: {exc}")

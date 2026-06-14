@@ -66,7 +66,10 @@ def get_todays_games(force_refresh=False):
                 status = game.get("status", {}).get(
                     "abstractGameState", ""
                 )
-                if status in ("Final", "Cancelled"):
+                # Only include pregame games — Live/Final games
+                # have unreliable in-game/closing odds that
+                # corrupt predictions for already-played games
+                if status != "Preview":
                     continue
                 home = game.get("teams", {}).get("home", {})
                 away = game.get("teams", {}).get("away", {})

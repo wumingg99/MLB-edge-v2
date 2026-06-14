@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 
@@ -20,6 +21,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 tz = pytz.timezone(TIMEZONE)
+
+# Durable dedup: in-memory fast path, falls back to disk on cache miss.
+_logged_keys: set = set()
+
+
+def _already_logged(game_id, quote_ts):
+    """Return True if (game_id, quote_ts) was already written to the audit log.
+
+    Checks the in-memory set first. On a miss, scans prediction_audit.jsonl so
+    the check survives a process restart. Populates the cache on a disk hit.
+    """
+    key = f"{game_id}:{quote_ts}"
+    if key in _logged_keys:
+        return True
+    try:
+        from sheets import AUDIT_PATH
+        if not AUDIT_PATH.exists():
+            return False
+        with AUDIT_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (row.get("game_id") == game_id
+                        and (row.get("prediction") or {}).get("quote_timestamp") == quote_ts):
+                    _logged_keys.add(key)
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 async def send_message(app, text):
@@ -60,16 +92,16 @@ async def fetch_all_games(api_key=None, force_refresh=False):
     try:
         from sheets import log_prediction
 
-        if not hasattr(fetch_all_games, "_logged"):
-            fetch_all_games._logged = set()
         for game, prediction, odds_entry in games_data:
             if not prediction:
                 continue
+            game_id = game.get("game_id")
             quote_time = prediction.get("quote_timestamp") or "no-quote"
-            key = f"{game.get('game_id')}:{quote_time}"
-            if key not in fetch_all_games._logged:
+            is_new = not _already_logged(game_id, quote_time)
+            if is_new:
                 log_prediction(game, prediction, odds_entry)
-                fetch_all_games._logged.add(key)
+                _logged_keys.add(f"{game_id}:{quote_time}")
+            prediction["_newly_logged"] = is_new
     except Exception as exc:
         logger.error("Prediction logging error: %s", exc)
 
@@ -216,6 +248,87 @@ def _format_detail(game, prediction):
 
 
 
+async def cmd_v2_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    del context
+    from sheets import get_user_bets, units_won
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+
+    all_rows = get_user_bets("mlb_v2", days=None)
+    if not all_rows:
+        await update.message.reply_text("No bets logged yet in user_bets.")
+        return
+
+    today_str = datetime.now(tz).strftime("%Y-%m-%d")
+    week_cutoff = (datetime.now(tz) - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    def summarize(rows):
+        w = l = p = 0
+        units = 0.0
+        for row in rows:
+            result = row[8] if len(row) > 8 else ""
+            if not result:
+                continue
+            price = row[6] if len(row) > 6 else 0
+            stake = row[7] if len(row) > 7 else 1
+            u = units_won(price, stake, result)
+            units += u
+            if result == "WIN":
+                w += 1
+            elif result == "LOSS":
+                l += 1
+            elif result == "PUSH":
+                p += 1
+        return w, l, p, units
+
+    daily = [r for r in all_rows if str(r[0])[:10] == today_str]
+    weekly = [r for r in all_rows if str(r[0])[:10] >= week_cutoff]
+    lifetime = all_rows
+
+    # Recent detail (last 3 days)
+    detail_cutoff = (datetime.now(tz) - timedelta(days=3)).strftime("%Y-%m-%d")
+    detail_rows = [r for r in all_rows if str(r[0])[:10] >= detail_cutoff]
+    by_date = defaultdict(list)
+    for row in detail_rows:
+        by_date[str(row[0])[:10]].append(row)
+
+    lines = ["\U0001F4CA V2 Bet Tracker"]
+    for date in sorted(by_date.keys(), reverse=True):
+        lines.append(f"\n{date}:")
+        day_total = 0.0
+        for row in by_date[date]:
+            home, away, market, pick = row[2], row[3], row[4], row[5]
+            price = row[6] if len(row) > 6 else ""
+            stake = row[7] if len(row) > 7 else 1
+            result = row[8] if len(row) > 8 else ""
+            label = f"{away} @ {home} | {market} {pick} ({price})"
+            if not result:
+                lines.append(f"  {label} | {stake}u | PENDING")
+            else:
+                u = units_won(price, stake, result)
+                day_total += u
+                sign = "+" if u >= 0 else ""
+                lines.append(f"  {label} | {stake}u | {result} {sign}{u:.2f}u")
+        if day_total:
+            sign = "+" if day_total >= 0 else ""
+            lines.append(f"  Day total: {sign}{day_total:.2f}u")
+
+    dw, dl, dp, du = summarize(daily)
+    ww, wl, wp, wu = summarize(weekly)
+    lw, ll, lp, lu = summarize(lifetime)
+
+    def fmt(label, w, l, p, u):
+        sign = "+" if u >= 0 else ""
+        return f"{label}: {w}W-{l}L-{p}P | {sign}{u:.2f}u"
+
+    lines.append("")
+    lines.append(fmt("\U0001F4C5 Daily", dw, dl, dp, du))
+    lines.append(fmt("\U0001F4C6 Weekly", ww, wl, wp, wu))
+    lines.append(fmt("\U0001F4CA Lifetime", lw, ll, lp, lu))
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_v2_brief(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -263,7 +376,8 @@ async def cmd_v2_edge(
         _format_detail(game, prediction)
         for game, prediction in edges
     )
-    await update.message.reply_text(message)
+    for start in range(0, len(message), 4096):
+        await update.message.reply_text(message[start:start + 4096])
 
 
 async def cmd_v2_refresh(
@@ -310,6 +424,8 @@ async def cmd_v2_results(
             await update.message.reply_text("No final results available.")
             return
         update_results_in_sheet(results, date_override=results_date)
+        from sheets import grade_user_bets
+        grade_user_bets(results_date, results)
         predictions = get_stored_predictions(results_date)
         lines = [f"⚾ MLB Edge V2 — Results {results_date}"]
         for result in results:
@@ -402,6 +518,7 @@ def main():
     print("Starting MLB Edge V2 Bot...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("v2_brief", cmd_v2_brief))
+    app.add_handler(CommandHandler("v2_bets", cmd_v2_bets))
     app.add_handler(CommandHandler("v2_edge", cmd_v2_edge))
     app.add_handler(CommandHandler("v2_refresh", cmd_v2_refresh))
     app.add_handler(CommandHandler("v2_results", cmd_v2_results))
