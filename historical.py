@@ -21,12 +21,51 @@ from model import (
 )
 
 
+
+# ── Historical weather cache (Open-Meteo, free) ──────────────────
+import json as _json_w
+from pathlib import Path as _Path_w
+
+_HW_CACHE_PATH = _Path_w(__file__).with_name("tier3_weather_full.json")
+_HW_CACHE = {}
+
+def _load_hw():
+    global _HW_CACHE
+    if not _HW_CACHE and _HW_CACHE_PATH.exists():
+        _HW_CACHE = _json_w.loads(_HW_CACHE_PATH.read_text())
+
+_DOMES_HW = {
+    "Tropicana Field","Globe Life Field","Chase Field","Minute Maid Park",
+    "Daikin Park","American Family Field","loanDepot park","Rogers Centre",
+}
+
+def _get_hw(venue, game_time_utc, season):
+    """Look up historical weather for a venue/game-time pair."""
+    if venue in _DOMES_HW:
+        return {"weather_factor": 1.0, "is_dome": True, "available": True}
+    if not _HW_CACHE:
+        return {"weather_factor": 1.0, "is_dome": False, "available": False}
+    key = f"{venue}::{season}"
+    day_map = _HW_CACHE.get(key, {})
+    if not day_map:
+        return {"weather_factor": 1.0, "is_dome": False, "available": False}
+    date_str = game_time_utc[:10] if game_time_utc else ""
+    day = day_map.get(date_str, {})
+    for h in [19, 20, 18, 21, 17]:
+        if str(h) in day:
+            e = day[str(h)]
+            return {"weather_factor": e["factor"],
+                    "is_dome": False, "available": True}
+    return {"weather_factor": 1.0, "is_dome": False, "available": False}
+
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 CACHE_DIR = Path(__file__).with_name("cache")
 DATASET_PATH = Path(__file__).with_name("historical_dataset.jsonl")
 DEFAULT_ODDS_PATH = Path(__file__).with_name("historical_odds.csv")
-SEASONS = tuple(range(2022, datetime.now().year + 1))
+SEASONS = tuple(range(2022, datetime.now().year + 1))  # 2019+2021 excluded
 SEASON_WEIGHTS = {
+    2019: 0.40,   # full season, older — lower weight
+    2021: 0.45,   # full season, post-COVID
     2022: 0.55,
     2023: 0.70,
     2024: 0.85,
@@ -83,7 +122,7 @@ def get_season_games(season):
                 "startDate": f"{season}-03-01",
                 "endDate": f"{season}-11-30",
                 "gameType": "R",
-                "hydrate": "team,probablePitcher,linescore,venue",
+                "hydrate": "team,probablePitcher,linescore,venue,officials,lineups",
             },
         )
         for date_entry in data.get("dates", []):
@@ -105,6 +144,18 @@ def get_season_games(season):
                 away_pitcher = away.get("probablePitcher", {})
                 games.append({
                     "game_id": int(game.get("gamePk")),
+                    "umpire_id": next(
+                        (o["official"]["id"] for o in game.get("officials", [])
+                         if o.get("officialType") == "Home Plate"), None
+                    ),
+                    "home_lineup_ids": [
+                        p.get("id") for p in
+                        game.get("lineups", {}).get("homePlayers", [])
+                    ][:9],
+                    "away_lineup_ids": [
+                        p.get("id") for p in
+                        game.get("lineups", {}).get("awayPlayers", [])
+                    ][:9],
                     "date": date_entry.get("date"),
                     "game_time": game.get(
                         "gameDate", f"{date_entry.get('date')}T12:00:00Z"
@@ -188,6 +239,68 @@ def get_pitcher_game_logs(pitcher_id, season):
     except Exception as exc:
         print(f"  Pitcher log error {pitcher_id}/{season}: {exc}")
         return {}
+
+
+
+def get_batter_game_logs(player_id, season):
+    """Game-by-game hitting splits sorted by date (for rolling wOBA)."""
+    if not player_id:
+        return []
+    try:
+        data = _cached_request(
+            f"{MLB_API_BASE}/people/{player_id}/stats",
+            {
+                "stats": "gameLog",
+                "group": "hitting",
+                "season": season,
+                "gameType": "R",
+            },
+        )
+        splits = []
+        for sg in data.get("stats", []):
+            for split in sg.get("splits", []):
+                date = split.get("date", "")
+                if date:
+                    splits.append({"date": date, "stat": split.get("stat", {})})
+        return sorted(splits, key=lambda x: x["date"])
+    except Exception as exc:
+        print(f"  Batter log error {player_id}/{season}: {exc}")
+        return []
+
+
+def _woba_asof(splits, date_str, min_pa=15):
+    """Rolling wOBA from batting splits strictly before date_str."""
+    prior = [s["stat"] for s in splits if s["date"] < date_str]
+    if not prior:
+        return LG_WOBA
+    ab  = sum(float(s.get("atBats",           0) or 0) for s in prior)
+    bb  = sum(float(s.get("baseOnBalls",       0) or 0) for s in prior)
+    hbp = sum(float(s.get("hitByPitch",        0) or 0) for s in prior)
+    sf  = sum(float(s.get("sacFlies",          0) or 0) for s in prior)
+    ibb = sum(float(s.get("intentionalWalks",  0) or 0) for s in prior)
+    h   = sum(float(s.get("hits",              0) or 0) for s in prior)
+    d   = sum(float(s.get("doubles",           0) or 0) for s in prior)
+    t   = sum(float(s.get("triples",           0) or 0) for s in prior)
+    hr  = sum(float(s.get("homeRuns",          0) or 0) for s in prior)
+    sngl = max(h - d - t - hr, 0)
+    num  = 0.690*bb + 0.722*hbp + 0.888*sngl + 1.271*d + 1.616*t + 2.101*hr
+    den  = ab + bb - ibb + sf + hbp
+    if den < min_pa:
+        return LG_WOBA
+    return max(0.15, min(num / den, 0.55))
+
+
+def _rolling_lineup_woba(player_ids, batter_log_cache, date_str):
+    """Average rolling wOBA across lineup (max 9 batters) as-of date_str."""
+    if not player_ids:
+        return LG_WOBA
+    wobas = [
+        _woba_asof(batter_log_cache.get(pid, []), date_str)
+        for pid in player_ids[:9]
+    ]
+    while len(wobas) < 9:
+        wobas.append(LG_WOBA)
+    return round(sum(wobas) / 9, 4)
 
 
 def _add_fields(target, stat, fields):
@@ -511,14 +624,74 @@ def _snapshot_quality(home, away, home_pitcher, away_pitcher):
     return sum(values) / len(values)
 
 
+# ── Lineup wOBA helpers ───────────────────────────────────────────
+LG_WOBA = 0.320
+_woba_cache: dict = {}
+
+def _player_woba(player_id, season):
+    """Season wOBA for one player (cached). Falls back to LG_WOBA."""
+    key = (player_id, season)
+    if key in _woba_cache:
+        return _woba_cache[key]
+    try:
+        data = _cached_request(
+            f"{MLB_API_BASE}/people/{player_id}/stats",
+            {"stats": "season", "group": "hitting",
+             "season": season, "gameType": "R"},
+        )
+        for sg in data.get("stats", []):
+            splits = sg.get("splits", [])
+            if not splits:
+                continue
+            st = splits[0].get("stat", {})
+            ab  = float(st.get("atBats",        0) or 0)
+            bb  = float(st.get("baseOnBalls",   0) or 0)
+            hbp = float(st.get("hitByPitch",    0) or 0)
+            sf  = float(st.get("sacFlies",      0) or 0)
+            ibb = float(st.get("intentionalWalks", 0) or 0)
+            h   = float(st.get("hits",          0) or 0)
+            d   = float(st.get("doubles",       0) or 0)
+            t   = float(st.get("triples",       0) or 0)
+            hr  = float(st.get("homeRuns",      0) or 0)
+            s   = max(h - d - t - hr, 0)
+            num = (0.690*bb + 0.722*hbp + 0.888*s +
+                   1.271*d  + 1.616*t   + 2.101*hr)
+            den = ab + bb - ibb + sf + hbp
+            if den >= 20:
+                woba = max(0.15, min(num / den, 0.55))
+                _woba_cache[key] = woba
+                return woba
+    except Exception:
+        pass
+    _woba_cache[key] = LG_WOBA
+    return LG_WOBA
+
+def _lineup_woba(player_ids, season):
+    """Average wOBA across up to 9 batters."""
+    if not player_ids:
+        return LG_WOBA
+    wobas = [_player_woba(pid, season) for pid in player_ids[:9]]
+    while len(wobas) < 9:
+        wobas.append(LG_WOBA)
+    return sum(wobas) / 9
+
+
 def build_historical_dataset(
     seasons=SEASONS,
     odds_path=None,
     dataset_path=DATASET_PATH,
 ):
+    _load_hw()  # load weather cache once
     odds = load_historical_odds(odds_path)
+    # Load umpire factors
+    _uf_path = Path(__file__).with_name("umpire_factors.json")
+    _umpire_factors = {}
+    if _uf_path.exists():
+        _umpire_factors = {int(k): v["factor"] for k,v in json.loads(_uf_path.read_text()).items()}
+        print(f"  Umpire factors loaded: {len(_umpire_factors)} umpires")
     park_factors = get_park_factors()
     records = []
+    batter_log_cache = {}  # populated per-season below
 
     for season in seasons:
         games = get_season_games(season)
@@ -614,11 +787,22 @@ def build_historical_dataset(
                 "away_bullpen": away_team_snapshot["bullpen"],
                 "park_factor": park["runs"],
                 "park_hr_factor": park["hr"],
-                "weather": {
-                    "weather_factor": 1.0,
-                    "is_dome": False,
-                    "available": False,
-                },
+                "weather": _get_hw(
+                    game["venue"], game["game_time"], season
+                ),
+                "umpire_factor": _umpire_factors.get(
+                    game.get("umpire_id"), 1.0
+                ),
+                "home_lineup_woba": _rolling_lineup_woba(
+                    game.get("home_lineup_ids", []),
+                    batter_log_cache,
+                    game_date.isoformat(),
+                ),
+                "away_lineup_woba": _rolling_lineup_woba(
+                    game.get("away_lineup_ids", []),
+                    batter_log_cache,
+                    game_date.isoformat(),
+                ),
                 "home_rest_days": home_team_snapshot["rest_days"],
                 "away_rest_days": away_team_snapshot["rest_days"],
                 "has_real_pitchers": True,

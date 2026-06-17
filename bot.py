@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytz
 from telegram import Update
@@ -21,6 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 tz = pytz.timezone(TIMEZONE)
+
+PREGAME_CUTOFF_BUFFER_MIN = 0
 
 # Durable dedup: in-memory fast path, falls back to disk on cache miss.
 _logged_keys: set = set()
@@ -54,11 +56,25 @@ def _already_logged(game_id, quote_ts):
     return False
 
 
-async def send_message(app, text):
+def _safe_snapshot_write(game, prediction, odds_entry, stage):
+    """Write a snapshot; log and swallow any error. Never raises."""
     try:
+        from store import init_db, insert_pregame_snapshot, DB_PATH
+        conn = init_db(DB_PATH)
+        try:
+            insert_pregame_snapshot(conn, game, prediction, odds_entry, stage=stage)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("Snapshot write failed (non-fatal, stage=%s): %s", stage, exc)
+
+
+async def send_message(app, text, chat_id=None):
+    try:
+        target = chat_id if chat_id is not None else TELEGRAM_CHAT_ID
         for start in range(0, len(text), 4096):
             await app.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=target,
                 text=text[start:start + 4096],
             )
     except Exception as exc:
@@ -78,7 +94,25 @@ async def fetch_all_games(api_key=None, force_refresh=False):
         return [], []
 
     games_data = []
+    now_utc = datetime.now(timezone.utc)
     for game, context, odds_entry in cached:
+        away = game.get("away_team", "?")
+        home = game.get("home_team", "?")
+        raw_time = game.get("game_time_utc", "")
+        if not raw_time:
+            logger.info("Gated (no start time): %s @ %s", away, home)
+            continue
+        try:
+            first_pitch = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            if first_pitch.tzinfo is None:
+                first_pitch = first_pitch.replace(tzinfo=timezone.utc)
+            cutoff = first_pitch - timedelta(minutes=PREGAME_CUTOFF_BUFFER_MIN)
+            if now_utc >= cutoff:
+                logger.info("Gated (in progress): %s @ %s", away, home)
+                continue
+        except (ValueError, TypeError):
+            logger.info("Gated (bad start time %r): %s @ %s", raw_time, away, home)
+            continue
         total = odds_entry.get("total") if odds_entry else None
         run_line = odds_entry.get("run_line") if odds_entry else None
         prediction = predict_game(
@@ -100,6 +134,7 @@ async def fetch_all_games(api_key=None, force_refresh=False):
             is_new = not _already_logged(game_id, quote_time)
             if is_new:
                 log_prediction(game, prediction, odds_entry)
+                _safe_snapshot_write(game, prediction, odds_entry, "EARLY")
                 _logged_keys.add(f"{game_id}:{quote_time}")
             prediction["_newly_logged"] = is_new
     except Exception as exc:

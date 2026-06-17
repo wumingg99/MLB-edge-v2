@@ -7,6 +7,8 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CLV_TELEGRAM_TOKEN = os.getenv("CLV_TELEGRAM_TOKEN")
+CLV_TELEGRAM_CHAT_ID = os.getenv("CLV_TELEGRAM_CHAT_ID", "-1004395816920")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Singapore")
 SHEETS_URL = os.getenv("SHEETS_URL")

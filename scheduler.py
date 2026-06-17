@@ -1,11 +1,17 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 import pytz
 
 
 tz = pytz.timezone("Asia/Singapore")
+
+# Minutes before first pitch to capture the closing line.
+CLOSE_OFFSET_MIN = 35
+# Games whose capture targets fall within this window share one API refresh.
+COALESCE_WINDOW_MIN = 15
 
 
 async def scheduled_brief(app):
@@ -44,6 +50,9 @@ async def check_new_lines(app):
             await send_message(app, format_summary(games_data, now))
     except Exception as exc:
         print(f"V3 line refresh error: {exc}", flush=True)
+
+
+_results_graded_dates: set = set()  # dates already auto-graded
 
 
 async def evening_results(app):
@@ -97,6 +106,218 @@ async def evening_results(app):
         print(f"V3 results error: {exc}", flush=True)
 
 
+
+async def check_all_games_final(app):
+    """
+    Polls MLB API every 30 min between noon-14:30 SGT (midnight-2:30am EDT).
+    Fires evening_results immediately once all games reach a terminal status.
+    A daily flag prevents double-firing with the 20:15 SGT cron.
+    """
+    try:
+        import requests
+        from sheets import get_results_date
+        grade_date = get_results_date()
+        if grade_date in _results_graded_dates:
+            return
+        r = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": grade_date},
+            timeout=10,
+        )
+        data = r.json()
+        games = []
+        for date_entry in data.get("dates", []):
+            games.extend(date_entry.get("games", []))
+        if not games:
+            return
+        terminal = {"Final", "Cancelled", "Postponed", "Suspended"}
+        non_final = [
+            g for g in games
+            if g.get("status", {}).get("abstractGameState", "") not in terminal
+        ]
+        if non_final:
+            return
+        print(
+            f"[auto-grade] All {len(games)} games Final for {grade_date} — grading now",
+            flush=True,
+        )
+        _results_graded_dates.add(grade_date)
+        await evening_results(app)
+    except Exception as exc:
+        print(f"[auto-grade] Error: {exc}", flush=True)
+
+
+async def _guarded_evening_results(app):
+    """
+    20:15 SGT cron wrapper. Skips if check_all_games_final already
+    graded results for today, preventing duplicate Telegram messages.
+    """
+    try:
+        from sheets import get_results_date
+        grade_date = get_results_date()
+        if grade_date in _results_graded_dates:
+            print(f"[evening_results] Already graded {grade_date} — skipping cron", flush=True)
+            return
+        _results_graded_dates.add(grade_date)
+        await evening_results(app)
+    except Exception as exc:
+        print(f"[guarded_evening_results] Error: {exc}", flush=True)
+
+
+async def run_clv_computation(app):
+    """
+    Daily CLV computation — runs after most West-Coast games have closed.
+    Additive and fail-safe; never affects other jobs.
+    """
+    try:
+        from store import init_db, DB_PATH
+        from clv import compute_clv, clv_summary, format_clv_digest
+
+        conn = init_db(DB_PATH)
+        try:
+            n = compute_clv(conn)
+            summary = clv_summary(conn)
+            total_sl = summary.get("total_same_line") or {}
+            rl       = summary.get("rl") or {}
+            total_lm = summary.get("total_line_moved") or {}
+            avg_t  = total_sl.get("avg_clv_points")
+            pct_t  = total_sl.get("pct_positive")
+            avg_r  = rl.get("avg_clv_points")
+            pct_r  = rl.get("pct_positive")
+            print(
+                f"V3 CLV: {n} row(s) written | "
+                f"TOTAL same-line n={total_sl.get('n', 0)} "
+                + (f"avg={avg_t:+.3f} {pct_t:.0%}+" if avg_t is not None else "(no data)")
+                + f" | TOTAL line-moved n={total_lm.get('n', 0)} (not comparable)"
+                + f" | RL n={rl.get('n', 0)} "
+                + (f"avg={avg_r:+.3f} {pct_r:.0%}+" if avg_r is not None else "(no data)"),
+                flush=True,
+            )
+            digest = format_clv_digest(summary)
+            if digest:
+                try:
+                    from bot import send_message
+                    await send_message(app, digest)
+                except Exception as exc:
+                    print(f"V2 CLV digest send error: {exc}", flush=True)
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"V3 CLV error: {exc}", flush=True)
+
+
+def _coalesce_games(games, close_offset_min=None, coalesce_window_min=None):
+    """
+    Group games into clusters so nearby capture targets share one API refresh.
+
+    For each game, target = game_time_utc - close_offset_min.
+    Games whose targets fall within coalesce_window_min of the cluster's
+    earliest target are grouped together.  The cluster fires at that earliest
+    target (min), guaranteeing no game in the cluster slips past its own window.
+
+    Returns [(fire_time_utc, [game_id, ...]), ...] sorted by fire_time.
+    Games with no parseable game_time_utc are silently skipped.
+    """
+    if close_offset_min is None:
+        close_offset_min = CLOSE_OFFSET_MIN
+    if coalesce_window_min is None:
+        coalesce_window_min = COALESCE_WINDOW_MIN
+
+    targets = []
+    for game in games:
+        raw = game.get("game_time_utc")
+        if not raw:
+            continue
+        try:
+            fp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            target = fp - timedelta(minutes=close_offset_min)
+            targets.append((target, game.get("game_id")))
+        except (ValueError, TypeError):
+            continue
+
+    if not targets:
+        return []
+
+    targets.sort(key=lambda t: t[0])
+
+    clusters = []
+    cluster_fire, first_id = targets[0]
+    cluster_ids = [first_id]
+    for target, game_id in targets[1:]:
+        if (target - cluster_fire).total_seconds() <= coalesce_window_min * 60:
+            cluster_ids.append(game_id)
+        else:
+            clusters.append((cluster_fire, cluster_ids))
+            cluster_fire, cluster_ids = target, [game_id]
+    clusters.append((cluster_fire, cluster_ids))
+    return clusters
+
+
+async def _run_closing_cluster(app, game_date, game_ids):
+    """
+    One-off APScheduler job: refresh odds once for this cluster, then write a
+    FINAL snapshot for every game in game_ids that is still in Preview status.
+    Any error is logged and swallowed — never affects other scheduled jobs.
+    """
+    try:
+        from bot import fetch_all_games, _safe_snapshot_write
+        from config import ODDS_API_KEY
+
+        _, games_data = await fetch_all_games(ODDS_API_KEY, force_refresh=True)
+        by_game_id = {
+            item[0].get("game_id"): item
+            for item in games_data
+            if item[0]
+        }
+        written = 0
+        for gid in game_ids:
+            item = by_game_id.get(gid)
+            if not item:
+                continue
+            game, prediction, odds_entry = item
+            if game.get("status") == "Preview":
+                _safe_snapshot_write(game, prediction, odds_entry, "FINAL")
+                written += 1
+        print(
+            f"V3: Closing cluster done — {written} FINAL snapshot(s) for {game_date}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"V3: Closing cluster error ({game_date}): {exc}", flush=True)
+
+
+async def schedule_closing_captures(scheduler, app):
+    """
+    Register one-off DateTrigger jobs for today's closing captures.
+    Called once at startup (via 90-s one-shot) and once daily at 10:30 SGT.
+    replace_existing=True makes mid-day restarts safe — a double-registration
+    is a no-op.  Clusters whose fire_time has already passed are skipped.
+    """
+    from data import get_todays_date, get_todays_games
+
+    game_date, _ = get_todays_date()
+    games = get_todays_games()
+    clusters = _coalesce_games(games)
+    now_utc = datetime.now(timezone.utc)
+    scheduled = 0
+    for fire_time, game_ids in clusters:
+        if (fire_time - now_utc).total_seconds() < 60:
+            continue  # past or too close; skip
+        job_id = f"close_{game_date}_{fire_time.strftime('%H%M%S')}"
+        scheduler.add_job(
+            _run_closing_cluster,
+            DateTrigger(run_date=fire_time, timezone=timezone.utc),
+            args=[app, game_date, game_ids],
+            id=job_id,
+            replace_existing=True,
+        )
+        scheduled += 1
+    print(
+        f"V3: Scheduled {scheduled} closing-capture cluster(s) for {game_date}",
+        flush=True,
+    )
+
+
 def setup_scheduler(app):
     scheduler = AsyncIOScheduler(
         timezone=tz,
@@ -120,9 +341,44 @@ def setup_scheduler(app):
             id=f"v3_lines_{hour}",
         )
     scheduler.add_job(
-        evening_results,
+        _guarded_evening_results,
         CronTrigger(hour=20, minute=15, timezone=tz),
         args=[app],
         id="v3_evening_results",
+    )
+    # Daily: compute CLV from EARLY+FINAL pairs after West-Coast games have closed.
+    scheduler.add_job(
+        run_clv_computation,
+        CronTrigger(hour=21, minute=30, timezone=tz),
+        args=[app],
+        id="v3_clv_daily",
+    )
+    # Auto-grade: check every 30 min noon-14:30 SGT; fire results once all games Final.
+    scheduler.add_job(
+        check_all_games_final,
+        CronTrigger(hour="12-14", minute="0,30", timezone=tz),
+        args=[app],
+        id="v3_auto_grade",
+    )
+    # Daily: re-register that day's closing-capture cluster jobs at 10:30 SGT.
+    scheduler.add_job(
+        schedule_closing_captures,
+        CronTrigger(hour=10, minute=30, timezone=tz),
+        args=[scheduler, app],
+        id="v3_schedule_closers",
+    )
+    # Startup one-shot: runs 90 s after start so the scheduler is fully running.
+    # Handles mid-day restarts — today's cluster jobs are re-registered without
+    # waiting for the 10:30 SGT cron.  replace_existing on cluster jobs makes
+    # a double-registration harmless.
+    scheduler.add_job(
+        schedule_closing_captures,
+        DateTrigger(
+            run_date=datetime.now(timezone.utc) + timedelta(seconds=90),
+            timezone=timezone.utc,
+        ),
+        args=[scheduler, app],
+        id="v3_startup_closers",
+        replace_existing=True,
     )
     return scheduler

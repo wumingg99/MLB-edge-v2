@@ -457,34 +457,79 @@ def get_bullpen_stats(team_id, season=None):
 
 
 def get_park_factors():
+    """
+    2025 MLB park factors — 5-year weighted average, multiplier format.
+    1.00 = neutral. Keyed to exact MLB Stats API venue names.
+    """
     return {
-        "Coors Field": {"runs": 1.35, "hr": 1.40},
-        "Fenway Park": {"runs": 1.10, "hr": 0.95},
-        "Globe Life Field": {"runs": 1.05, "hr": 1.10},
-        "Great American Ball Park": {"runs": 1.12, "hr": 1.20},
-        "Wrigley Field": {"runs": 1.08, "hr": 1.05},
-        "Oracle Park": {"runs": 0.88, "hr": 0.75},
-        "Tropicana Field": {"runs": 0.94, "hr": 0.92},
-        "Petco Park": {"runs": 0.92, "hr": 0.85},
-        "T-Mobile Park": {"runs": 0.91, "hr": 0.88},
-        "Dodger Stadium": {"runs": 0.95, "hr": 0.98},
-        "Minute Maid Park": {"runs": 1.02, "hr": 1.05},
+        # Extreme hitter parks
+        "Coors Field":                   {"runs": 1.20, "hr": 1.12},  # COL altitude
+        "Great American Ball Park":      {"runs": 1.10, "hr": 1.15},  # CIN
+        # Hitter-friendly
+        "American Family Field":         {"runs": 1.06, "hr": 1.10},  # MIL retractable
+        "Citizens Bank Park":            {"runs": 1.05, "hr": 1.08},  # PHI
+        "Rate Field":                    {"runs": 1.04, "hr": 1.08},  # CWS
+        "Yankee Stadium":                {"runs": 1.04, "hr": 1.14},  # NYY
+        "Fenway Park":                   {"runs": 1.04, "hr": 0.97},  # BOS
+        "Oriole Park at Camden Yards":   {"runs": 1.02, "hr": 1.05},  # BAL
+        "Daikin Park":                   {"runs": 1.02, "hr": 1.04},  # HOU retractable
+        "Minute Maid Park":              {"runs": 1.02, "hr": 1.04},  # HOU legacy name
+        "Wrigley Field":                 {"runs": 1.02, "hr": 1.02},  # CHC wind-dependent
+        # Near-neutral
+        "Nationals Park":                {"runs": 1.01, "hr": 1.03},  # WSH
+        "Chase Field":                   {"runs": 1.01, "hr": 0.99},  # ARI retractable
+        "Rogers Centre":                 {"runs": 1.00, "hr": 1.02},  # TOR dome
+        "Truist Park":                   {"runs": 1.00, "hr": 1.00},  # ATL
+        "Progressive Field":             {"runs": 0.98, "hr": 0.95},  # CLE
+        "Globe Life Field":              {"runs": 0.97, "hr": 1.00},  # TEX dome
+        "Busch Stadium":                 {"runs": 0.97, "hr": 0.93},  # STL
+        "PNC Park":                      {"runs": 0.97, "hr": 0.93},  # PIT
+        "Kauffman Stadium":              {"runs": 0.97, "hr": 0.90},  # KC
+        "Angel Stadium":                 {"runs": 0.97, "hr": 0.92},  # LAA
+        # Pitcher-friendly
+        "Dodger Stadium":                {"runs": 0.96, "hr": 0.88},  # LAD
+        "Comerica Park":                 {"runs": 0.96, "hr": 0.88},  # DET
+        "Target Field":                  {"runs": 0.96, "hr": 0.92},  # MIN
+        "Tropicana Field":               {"runs": 0.95, "hr": 0.93},  # TB dome
+        "Citi Field":                    {"runs": 0.95, "hr": 0.89},  # NYM
+        "loanDepot park":                {"runs": 0.95, "hr": 0.93},  # MIA dome
+        "T-Mobile Park":                 {"runs": 0.93, "hr": 0.89},  # SEA
+        "Petco Park":                    {"runs": 0.92, "hr": 0.86},  # SD
+        "Oracle Park":                   {"runs": 0.91, "hr": 0.78},  # SF
+        # Temporary / unknown → neutral
+        "Sutter Health Park":            {"runs": 1.00, "hr": 1.00},  # ATH Sacramento
+        "Journey Bank Ballpark":         {"runs": 1.00, "hr": 1.00},
+        "Bristol Motor Speedway":        {"runs": 1.00, "hr": 1.00},
+        "George M. Steinbrenner Field":  {"runs": 1.00, "hr": 1.00},
     }
 
-
 VENUE_COORDS = {
-    "Fenway Park": (42.3467, -71.0972),
-    "Yankee Stadium": (40.8296, -73.9262),
-    "Wrigley Field": (41.9484, -87.6553),
-    "Dodger Stadium": (34.0739, -118.2400),
-    "Oracle Park": (37.7786, -122.3893),
-    "Coors Field": (39.7559, -104.9942),
-    "Great American Ball Park": (39.0979, -84.5082),
-    "Petco Park": (32.7073, -117.1566),
-    "T-Mobile Park": (47.5914, -122.3325),
+    "Fenway Park":                   (42.3467, -71.0972),
+    "Yankee Stadium":                (40.8296, -73.9262),
+    "Oriole Park at Camden Yards":   (39.2838, -76.6218),
+    "Citizens Bank Park":            (39.9061, -75.1665),
+    "Citi Field":                    (40.7571, -73.8458),
+    "Nationals Park":                (38.8730, -77.0074),
+    "Truist Park":                   (33.8908, -84.4679),
+    "loanDepot park":                (25.7781, -80.2197),
+    "American Family Field":         (43.0280, -87.9712),
+    "Wrigley Field":                 (41.9484, -87.6553),
+    "Rate Field":                    (41.8299, -87.6338),
+    "Busch Stadium":                 (38.6226, -90.1928),
+    "PNC Park":                      (40.4469, -80.0057),
+    "Great American Ball Park":      (39.0979, -84.5082),
+    "Progressive Field":             (41.4962, -81.6852),
+    "Comerica Park":                 (42.3390, -83.0485),
+    "Kauffman Stadium":              (39.0517, -94.4803),
+    "Target Field":                  (44.9817, -93.2781),
+    "Dodger Stadium":                (34.0739, -118.2400),
+    "Angel Stadium":                 (33.8003, -117.8827),
+    "Oracle Park":                   (37.7786, -122.3893),
+    "Petco Park":                    (32.7073, -117.1566),
+    "Coors Field":                   (39.7559, -104.9942),
+    "T-Mobile Park":                 (47.5914, -122.3325),
+    "Sutter Health Park":            (38.5897, -121.5001),
 }
-
-
 def get_weather(venue, game_time_utc):
     cache_key = f"weather_{venue}_{game_time_utc}"
     if cache_key in _cache:
@@ -662,10 +707,10 @@ def get_odds(api_key, force_refresh=False):
             "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
             {
                 "apiKey": api_key,
-                "regions": "us",
+                "regions": "eu",
                 "markets": "totals,spreads",
                 "oddsFormat": "american",
-                "bookmakers": "draftkings,fanduel,betmgm,caesars",
+                "bookmakers": "pinnacle",
             },
             timeout=15,
         )

@@ -38,6 +38,7 @@ FEATURE_NAMES = (
     "park_run_factor", "park_hr_factor", "weather_factor", "is_open_air",
     "home_rest_days", "away_rest_days",
     "month_sin", "month_cos", "season_progress", "data_quality",
+    "umpire_factor",
 )
 
 
@@ -296,6 +297,7 @@ def build_features(context, total=None, run_line=None):
             min(_safe_float(context.get("away_rest_days"), 3.0), 10.0),
             math.sin(month_angle), math.cos(month_angle),
             float(progress), quality,
+            _safe_float(context.get("umpire_factor"), 1.0),
         ]
         if len(values) != len(FEATURE_NAMES):
             raise ValueError(

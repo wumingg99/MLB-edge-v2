@@ -444,15 +444,19 @@ def _merge_game_snapshots(snapshots):
 
 def get_stored_predictions(date):
     try:
-        rows = _read_sheet_rows()
-        grouped = {}
-        for row in rows[1:]:
-            parsed = _parse_row(row)
-            if not parsed or parsed["date"] != date:
-                continue
-            grouped.setdefault(parsed["game"], []).append(parsed)
+        # Primary: local audit file has ALL prediction snapshots in
+        # chronological order so _merge_game_snapshots correctly picks
+        # the first edge-flagged prediction (the moment the alert fired).
+        # The sheet only stores the last update per game (edge already closed).
+        grouped = _read_local_snapshots(date)
         if not grouped:
-            grouped = _read_local_snapshots(date)
+            # Fallback: Google Sheets
+            rows = _read_sheet_rows()
+            for row in rows[1:]:
+                parsed = _parse_row(row)
+                if not parsed or parsed["date"] != date:
+                    continue
+                grouped.setdefault(parsed["game"], []).append(parsed)
         return {
             game: _merge_game_snapshots(snapshots)
             for game, snapshots in grouped.items()
