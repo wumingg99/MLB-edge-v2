@@ -14,6 +14,14 @@ CLOSE_OFFSET_MIN = 35
 COALESCE_WINDOW_MIN = 15
 
 
+_BRIEF_PURPOSE = {
+    23: ("\U0001F3AF", "RL Action Window"),
+    1:  ("\U0001F4B0", "Totals Action Window"),
+    6:  ("\U0001F440", "Watch \u2014 Line Check"),
+    10: ("\U0001F440", "Watch \u2014 Final Check"),
+}
+
+
 async def scheduled_brief(app):
     try:
         from bot import fetch_all_games, format_summary, send_message
@@ -21,8 +29,14 @@ async def scheduled_brief(app):
 
         _, games_data = await fetch_all_games(ODDS_API_KEY)
         if games_data:
-            now = datetime.now(tz).strftime("%b %d, %Y")
-            await send_message(app, format_summary(games_data, now))
+            sgt_hour = datetime.now(tz).hour
+            emoji, purpose = _BRIEF_PURPOSE.get(
+                sgt_hour, ("\U0001F319", "Snapshot")
+            )
+            et_date = datetime.now(pytz.timezone("America/New_York")).strftime("%b %d")
+            now = datetime.now(tz).strftime("%b %d, %Y %H:%M SGT")
+            header = f"{emoji} {purpose} ({et_date} ET games) \u2014 posted {now}"
+            await send_message(app, format_summary(games_data, header))
     except Exception as exc:
         print(f"V3 brief error: {exc}", flush=True)
 
@@ -47,7 +61,8 @@ async def check_new_lines(app):
         ]
         if new_edges:
             now = datetime.now(tz).strftime("%b %d, %Y %H:%M SGT")
-            await send_message(app, format_summary(games_data, now))
+            header = f"\U0001F514 New Edge Alert \u2014 posted {now}"
+            await send_message(app, format_summary(games_data, header))
     except Exception as exc:
         print(f"V3 line refresh error: {exc}", flush=True)
 
@@ -72,8 +87,20 @@ async def evening_results(app):
             return
         update_results_in_sheet(results, date_override=results_date)
         predictions = get_stored_predictions(results_date)
-        lines = [f"V3 Results - {results_date}"]
+        now_str = datetime.now(tz).strftime("%b %d, %Y %H:%M SGT")
+        lines = [f"V3 Results - {results_date} ET ({now_str} posted)"]
         settled = 0
+
+        def _emoji(outcome):
+            o = str(outcome).upper()
+            if o == "WIN":
+                return "\u2705"
+            if o == "LOSS":
+                return "\u274C"
+            if o == "PUSH":
+                return "\u27A1\uFE0F"
+            return ""
+
         for result in results:
             prediction = predictions.get(result["game"])
             if not prediction:
@@ -85,7 +112,7 @@ async def evening_results(app):
                     prediction.get("total_pred"),
                 )
                 lines.append(
-                    f"{result['game']} O/U "
+                    f"{_emoji(outcome)} {result['game']} O/U "
                     f"{prediction.get('total_pred')}: {outcome}"
                 )
                 settled += 1
@@ -96,7 +123,7 @@ async def evening_results(app):
                     prediction.get("rl_point"),
                 )
                 lines.append(
-                    f"{result['game']} RL "
+                    f"{_emoji(outcome)} {result['game']} RL "
                     f"{prediction.get('rl_pred')}: {outcome}"
                 )
                 settled += 1

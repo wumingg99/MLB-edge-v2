@@ -42,6 +42,23 @@ def get_todays_date():
     return et_now.strftime("%Y-%m-%d"), False
 
 
+def _extract_lineup(game, key):
+    """Extract batting-order-sorted player IDs from lineups hydration."""
+    players = game.get("lineups", {}).get(key, [])
+    if not players:
+        return []
+    try:
+        def _order(p):
+            try:
+                return int(str(p.get("battingOrder", 9999)).strip() or 9999)
+            except (ValueError, TypeError):
+                return 9999
+        sorted_players = sorted(players, key=_order)
+        return [p["id"] for p in sorted_players if p.get("id")]
+    except Exception:
+        return []
+
+
 def get_todays_games(force_refresh=False):
     today, showing_next = get_todays_date()
     _cache["showing_next_day"] = showing_next
@@ -57,7 +74,7 @@ def get_todays_games(force_refresh=False):
             {
                 "sportId": 1,
                 "date": today,
-                "hydrate": "team,probablePitcher,venue,linescore",
+                "hydrate": "team,probablePitcher,venue,linescore,lineups,officials",
             },
         )
         games = []
@@ -107,6 +124,15 @@ def get_todays_games(force_refresh=False):
                     "venue": game.get("venue", {}).get("name", "Unknown"),
                     "start_time_sgt": game_time_sgt,
                     "status": status,
+                    "home_lineup_ids": _extract_lineup(game, "homePlayers"),
+                    "away_lineup_ids": _extract_lineup(game, "awayPlayers"),
+                    "umpire_id": next(
+                        (o["official"]["id"] for o in game.get("officials", [])
+                         if o.get("officialType") == "Home Plate"), None
+                    ),
+                    "lineups_confirmed": bool(
+                        game.get("lineups", {}).get("homePlayers")
+                    ),
                 })
         _cache["games"] = games
         _cache["games_date"] = today

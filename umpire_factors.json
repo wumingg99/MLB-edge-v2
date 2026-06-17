@@ -1,0 +1,524 @@
+{
+  "427164": {
+    "name": "Andy Fletcher",
+    "factor": 1.2688,
+    "avg_runs": 11.213,
+    "n": 61
+  },
+  "623949": {
+    "name": "Clint Vondrak",
+    "factor": 1.1825,
+    "avg_runs": 10.45,
+    "n": 60
+  },
+  "427533": {
+    "name": "Mark Wegner",
+    "factor": 1.138,
+    "avg_runs": 10.057,
+    "n": 53
+  },
+  "427129": {
+    "name": "Bruce Dreckman",
+    "factor": 1.1359,
+    "avg_runs": 10.038,
+    "n": 52
+  },
+  "676581": {
+    "name": "James Jean",
+    "factor": 1.1277,
+    "avg_runs": 9.966,
+    "n": 29
+  },
+  "483564": {
+    "name": "Dan Bellino",
+    "factor": 1.1075,
+    "avg_runs": 9.787,
+    "n": 61
+  },
+  "482608": {
+    "name": "Scott Barry",
+    "factor": 1.0961,
+    "avg_runs": 9.686,
+    "n": 51
+  },
+  "483912": {
+    "name": "Mike Muchlinski",
+    "factor": 1.0913,
+    "avg_runs": 9.644,
+    "n": 59
+  },
+  "482641": {
+    "name": "Adrian Johnson",
+    "factor": 1.0871,
+    "avg_runs": 9.607,
+    "n": 61
+  },
+  "665297": {
+    "name": "Tom Hanahan",
+    "factor": 1.079,
+    "avg_runs": 9.536,
+    "n": 56
+  },
+  "503586": {
+    "name": "Tripp Gibson",
+    "factor": 1.0781,
+    "avg_runs": 9.527,
+    "n": 55
+  },
+  "605674": {
+    "name": "Ryan Wills",
+    "factor": 1.0779,
+    "avg_runs": 9.525,
+    "n": 59
+  },
+  "427315": {
+    "name": "Alfonso M\u00e1rquez",
+    "factor": 1.075,
+    "avg_runs": 9.5,
+    "n": 62
+  },
+  "623946": {
+    "name": "Malachi Moore",
+    "factor": 1.074,
+    "avg_runs": 9.492,
+    "n": 59
+  },
+  "427197": {
+    "name": "Chris Guccione",
+    "factor": 1.0715,
+    "avg_runs": 9.469,
+    "n": 49
+  },
+  "427113": {
+    "name": "Laz Diaz",
+    "factor": 1.0611,
+    "avg_runs": 9.377,
+    "n": 61
+  },
+  "665281": {
+    "name": "Brian Walsh",
+    "factor": 1.0585,
+    "avg_runs": 9.354,
+    "n": 65
+  },
+  "503493": {
+    "name": "Sean Barber",
+    "factor": 1.0535,
+    "avg_runs": 9.31,
+    "n": 58
+  },
+  "623938": {
+    "name": "Erich Bacchus",
+    "factor": 1.0528,
+    "avg_runs": 9.304,
+    "n": 56
+  },
+  "608093": {
+    "name": "Junior Valentine",
+    "factor": 1.0495,
+    "avg_runs": 9.275,
+    "n": 51
+  },
+  "483561": {
+    "name": "Lance Barrett",
+    "factor": 1.0494,
+    "avg_runs": 9.274,
+    "n": 62
+  },
+  "665576": {
+    "name": "Brock Ballou",
+    "factor": 1.0475,
+    "avg_runs": 9.257,
+    "n": 35
+  },
+  "521251": {
+    "name": "Ben May",
+    "factor": 1.0457,
+    "avg_runs": 9.241,
+    "n": 58
+  },
+  "658292": {
+    "name": "Derek Thomas",
+    "factor": 1.0419,
+    "avg_runs": 9.208,
+    "n": 53
+  },
+  "596809": {
+    "name": "Ryan Additon",
+    "factor": 1.0379,
+    "avg_runs": 9.172,
+    "n": 58
+  },
+  "490319": {
+    "name": "Jordan Baker",
+    "factor": 1.0373,
+    "avg_runs": 9.167,
+    "n": 60
+  },
+  "484198": {
+    "name": "Alan Porter",
+    "factor": 1.0335,
+    "avg_runs": 9.133,
+    "n": 60
+  },
+  "596740": {
+    "name": "Jansen Visconti",
+    "factor": 1.0294,
+    "avg_runs": 9.097,
+    "n": 62
+  },
+  "483569": {
+    "name": "Vic Carapazza",
+    "factor": 1.0253,
+    "avg_runs": 9.061,
+    "n": 66
+  },
+  "427243": {
+    "name": "Marvin Hudson",
+    "factor": 1.0246,
+    "avg_runs": 9.055,
+    "n": 55
+  },
+  "431232": {
+    "name": "Chad Fairchild",
+    "factor": 1.0225,
+    "avg_runs": 9.036,
+    "n": 56
+  },
+  "427013": {
+    "name": "Lance Barksdale",
+    "factor": 1.022,
+    "avg_runs": 9.031,
+    "n": 64
+  },
+  "575629": {
+    "name": "Shane Livensparger",
+    "factor": 1.0214,
+    "avg_runs": 9.026,
+    "n": 38
+  },
+  "554242": {
+    "name": "Edwin Moscoso",
+    "factor": 1.0166,
+    "avg_runs": 8.984,
+    "n": 62
+  },
+  "427366": {
+    "name": "Brian O'Nora",
+    "factor": 1.0122,
+    "avg_runs": 8.945,
+    "n": 55
+  },
+  "521889": {
+    "name": "Stu Scheurwater",
+    "factor": 1.011,
+    "avg_runs": 8.934,
+    "n": 61
+  },
+  "547380": {
+    "name": "Carlos Torres",
+    "factor": 1.0109,
+    "avg_runs": 8.933,
+    "n": 60
+  },
+  "594151": {
+    "name": "Ramon De Jesus",
+    "factor": 1.0075,
+    "avg_runs": 8.903,
+    "n": 62
+  },
+  "605672": {
+    "name": "Jeremie Rehak",
+    "factor": 1.0063,
+    "avg_runs": 8.893,
+    "n": 56
+  },
+  "483919": {
+    "name": "Mark Ripperger",
+    "factor": 1.0058,
+    "avg_runs": 8.889,
+    "n": 63
+  },
+  "489985": {
+    "name": "Chad Whitson",
+    "factor": 1.0026,
+    "avg_runs": 8.86,
+    "n": 50
+  },
+  "605671": {
+    "name": "Charlie Ramos",
+    "factor": 0.9987,
+    "avg_runs": 8.825,
+    "n": 63
+  },
+  "428442": {
+    "name": "James Hoye",
+    "factor": 0.9973,
+    "avg_runs": 8.814,
+    "n": 59
+  },
+  "483630": {
+    "name": "John Tumpane",
+    "factor": 0.9946,
+    "avg_runs": 8.789,
+    "n": 57
+  },
+  "598411": {
+    "name": "Nestor Ceja",
+    "factor": 0.9926,
+    "avg_runs": 8.772,
+    "n": 57
+  },
+  "482663": {
+    "name": "David Rackley",
+    "factor": 0.9892,
+    "avg_runs": 8.742,
+    "n": 62
+  },
+  "644760": {
+    "name": "Adam Beck",
+    "factor": 0.9864,
+    "avg_runs": 8.717,
+    "n": 60
+  },
+  "511890": {
+    "name": "Quinn Wolcott",
+    "factor": 0.9858,
+    "avg_runs": 8.712,
+    "n": 59
+  },
+  "503490": {
+    "name": "Chris Segal",
+    "factor": 0.9801,
+    "avg_runs": 8.661,
+    "n": 59
+  },
+  "427044": {
+    "name": "CB Bucknor",
+    "factor": 0.9787,
+    "avg_runs": 8.649,
+    "n": 57
+  },
+  "427139": {
+    "name": "Doug Eddings",
+    "factor": 0.9773,
+    "avg_runs": 8.636,
+    "n": 66
+  },
+  "621660": {
+    "name": "Emil Jimenez",
+    "factor": 0.9753,
+    "avg_runs": 8.619,
+    "n": 63
+  },
+  "427344": {
+    "name": "Bill Miller",
+    "factor": 0.9742,
+    "avg_runs": 8.609,
+    "n": 64
+  },
+  "427520": {
+    "name": "Larry Vanover",
+    "factor": 0.974,
+    "avg_runs": 8.607,
+    "n": 28
+  },
+  "521051": {
+    "name": "Nick Mahrley",
+    "factor": 0.9732,
+    "avg_runs": 8.6,
+    "n": 55
+  },
+  "608158": {
+    "name": "Nate Tomlinson",
+    "factor": 0.9719,
+    "avg_runs": 8.589,
+    "n": 56
+  },
+  "484499": {
+    "name": "Manny Gonzalez",
+    "factor": 0.9714,
+    "avg_runs": 8.585,
+    "n": 53
+  },
+  "427554": {
+    "name": "Jim Wolf",
+    "factor": 0.9672,
+    "avg_runs": 8.547,
+    "n": 53
+  },
+  "427248": {
+    "name": "Dan Iassogna",
+    "factor": 0.9628,
+    "avg_runs": 8.508,
+    "n": 59
+  },
+  "605673": {
+    "name": "Alex Tosi",
+    "factor": 0.9628,
+    "avg_runs": 8.508,
+    "n": 61
+  },
+  "607884": {
+    "name": "Paul Clemons",
+    "factor": 0.9618,
+    "avg_runs": 8.5,
+    "n": 60
+  },
+  "605670": {
+    "name": "Dan Merzel",
+    "factor": 0.9609,
+    "avg_runs": 8.492,
+    "n": 59
+  },
+  "577468": {
+    "name": "Roberto Ortiz",
+    "factor": 0.9599,
+    "avg_runs": 8.483,
+    "n": 58
+  },
+  "664263": {
+    "name": "Edwin Jimenez",
+    "factor": 0.9595,
+    "avg_runs": 8.479,
+    "n": 48
+  },
+  "482620": {
+    "name": "Chris Conroy",
+    "factor": 0.9586,
+    "avg_runs": 8.472,
+    "n": 53
+  },
+  "503077": {
+    "name": "Adam Hamari",
+    "factor": 0.9556,
+    "avg_runs": 8.444,
+    "n": 63
+  },
+  "482666": {
+    "name": "D.J. Reyburn",
+    "factor": 0.9501,
+    "avg_runs": 8.397,
+    "n": 58
+  },
+  "429805": {
+    "name": "Todd Tichenor",
+    "factor": 0.9486,
+    "avg_runs": 8.383,
+    "n": 60
+  },
+  "573597": {
+    "name": "Gabe Morales",
+    "factor": 0.943,
+    "avg_runs": 8.333,
+    "n": 63
+  },
+  "544728": {
+    "name": "Nic Lentz",
+    "factor": 0.9417,
+    "avg_runs": 8.322,
+    "n": 59
+  },
+  "596805": {
+    "name": "John Libka",
+    "factor": 0.9405,
+    "avg_runs": 8.311,
+    "n": 61
+  },
+  "485856": {
+    "name": "Jonathan Parra",
+    "factor": 0.9262,
+    "avg_runs": 8.185,
+    "n": 27
+  },
+  "427413": {
+    "name": "Tony Randazzo",
+    "factor": 0.9234,
+    "avg_runs": 8.161,
+    "n": 56
+  },
+  "503502": {
+    "name": "Ryan Blakney",
+    "factor": 0.9152,
+    "avg_runs": 8.088,
+    "n": 57
+  },
+  "427053": {
+    "name": "Mark Carlson",
+    "factor": 0.9152,
+    "avg_runs": 8.088,
+    "n": 34
+  },
+  "427537": {
+    "name": "Hunter Wendelstedt",
+    "factor": 0.9119,
+    "avg_runs": 8.059,
+    "n": 34
+  },
+  "623945": {
+    "name": "Alex MacKay",
+    "factor": 0.9053,
+    "avg_runs": 8.0,
+    "n": 57
+  },
+  "545402": {
+    "name": "John Bacon",
+    "factor": 0.9012,
+    "avg_runs": 7.964,
+    "n": 56
+  },
+  "504381": {
+    "name": "Will Little",
+    "factor": 0.8891,
+    "avg_runs": 7.857,
+    "n": 49
+  },
+  "427292": {
+    "name": "Ron Kulpa",
+    "factor": 0.8807,
+    "avg_runs": 7.783,
+    "n": 23
+  },
+  "427093": {
+    "name": "Phil Cuzzi",
+    "factor": 0.8737,
+    "avg_runs": 7.721,
+    "n": 61
+  },
+  "658082": {
+    "name": "Jacob Metz",
+    "factor": 0.8638,
+    "avg_runs": 7.633,
+    "n": 30
+  },
+  "482631": {
+    "name": "Mike Estabrook",
+    "factor": 0.8589,
+    "avg_runs": 7.59,
+    "n": 61
+  },
+  "658536": {
+    "name": "Austin Jones",
+    "factor": 0.8581,
+    "avg_runs": 7.583,
+    "n": 36
+  },
+  "484183": {
+    "name": "Cory Blaser",
+    "factor": 0.8576,
+    "avg_runs": 7.579,
+    "n": 57
+  },
+  "427128": {
+    "name": "Rob Drake",
+    "factor": 0.831,
+    "avg_runs": 7.344,
+    "n": 32
+  },
+  "639723": {
+    "name": "Brennan Miller",
+    "factor": 0.8273,
+    "avg_runs": 7.311,
+    "n": 61
+  }
+}

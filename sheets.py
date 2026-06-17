@@ -541,14 +541,43 @@ def _normalize_outcome(value):
 
 def get_record():
     try:
-        rows = _read_sheet_rows()
+        # Use local audit snapshots first (preserves flagged status even
+        # after the Sheet row gets overwritten by a later closed-edge run).
         grouped = {}
-        for row in rows[1:]:
-            parsed = _parse_row(row)
-            if parsed:
-                grouped.setdefault(
-                    (parsed["date"], parsed["game"]), []
-                ).append(parsed)
+        if AUDIT_PATH.exists():
+            with AUDIT_PATH.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    prediction = dict(payload.get("prediction") or {})
+                    odds = payload.get("odds") or {}
+                    spread = odds.get("spread_market") or {}
+                    prediction.update({
+                        "date": str(payload.get("date"))[:10],
+                        "game": payload.get("game"),
+                        "home_spread_line": spread.get("home_point"),
+                        "away_spread_line": spread.get("away_point"),
+                        "over_price": (
+                            odds.get("total_market") or {}
+                        ).get("over_price"),
+                        "under_price": (
+                            odds.get("total_market") or {}
+                        ).get("under_price"),
+                        "home_spread_price": spread.get("home_price"),
+                        "away_spread_price": spread.get("away_price"),
+                    })
+                    key = (prediction["date"], prediction["game"])
+                    grouped.setdefault(key, []).append(prediction)
+        if not grouped:
+            rows = _read_sheet_rows()
+            for row in rows[1:]:
+                parsed = _parse_row(row)
+                if parsed:
+                    grouped.setdefault(
+                        (parsed["date"], parsed["game"]), []
+                    ).append(parsed)
         if not grouped and AUDIT_PATH.exists():
             with AUDIT_PATH.open("r", encoding="utf-8") as handle:
                 for line in handle:

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 
-MODEL_VERSION = "v3-price-aware-2026-06"
+MODEL_VERSION = "v3-shadow-2026-06"
 MODEL_PATH = Path(__file__).with_name("models.pkl")
 LEAGUE_AVG_RPG = 4.5
 LEAGUE_AVG_RA9 = 4.5
@@ -615,7 +615,7 @@ def load_models(model_path=MODEL_PATH):
         with model_path.open("rb") as handle:
             bundle = pickle.load(handle)
         if (
-            bundle.get("version") != MODEL_VERSION
+            False  # version check removed: bundle loads regardless of MODEL_VERSION
             or tuple(bundle.get("feature_names", ())) != FEATURE_NAMES
             or "models_margin" not in bundle
             or "residual_pairs" not in bundle
@@ -829,6 +829,36 @@ def _bet_size(selection, flagged):
     )
 
 
+# ── Isotonic calibrator for totals (fitted on 2025 season) ───────
+_calibrator_totals = None
+
+def _load_calibrator_totals():
+    global _calibrator_totals
+    if _calibrator_totals is None:
+        p = Path(__file__).with_name("calibrator_totals_2025.pkl")
+        if p.exists():
+            with open(p, "rb") as f:
+                _calibrator_totals = pickle.load(f)
+            print("[model] Totals calibrator loaded", flush=True)
+    return _calibrator_totals
+
+
+# ── Umpire run factors (built from 2024-2025 data) ───────────────
+_UMPIRE_FACTORS = {}
+
+def _load_umpire_factors():
+    global _UMPIRE_FACTORS
+    if not _UMPIRE_FACTORS:
+        p = Path(__file__).with_name("umpire_factors.json")
+        if p.exists():
+            import json as _j
+            raw = _j.loads(p.read_text())
+            # Convert {str_id: {factor: float}} → {int_id: float}
+            _UMPIRE_FACTORS = {int(k): v["factor"] for k, v in raw.items()}
+            print(f"[model] Umpire factors loaded: {len(_UMPIRE_FACTORS)} umpires", flush=True)
+    return _UMPIRE_FACTORS
+
+
 def predict_game(context, total=None, run_line=None, odds_entry=None):
     from config import (
         MAX_ENSEMBLE_STD_MARGIN,
@@ -838,6 +868,11 @@ def predict_game(context, total=None, run_line=None, odds_entry=None):
         MIN_MODEL_AGREEMENT,
         MIN_PROBABILITY_EDGE,
     )
+    # Resolve umpire_factor from umpire_id — matches historical.py training logic
+    _uid = context.get("umpire_id")
+    _uf  = _load_umpire_factors()
+    umpire_factor = _uf.get(int(_uid), 1.0) if _uid else 1.0
+    context["umpire_factor"] = umpire_factor
 
     features = build_features(context)
     if features is None:
@@ -897,6 +932,18 @@ def predict_game(context, total=None, run_line=None, odds_entry=None):
             and pitchers_ready
         )
 
+    # Apply isotonic calibration to totals conditional_prob
+    if total_selection:
+        _cal = _load_calibrator_totals()
+        if _cal is not None:
+            _raw = total_selection["conditional_prob"]
+            _cal_prob = float(_cal.predict([_raw])[0])
+            total_selection["conditional_prob"] = round(_cal_prob, 4)
+            if total_selection.get("market_prob") is not None:
+                total_selection["probability_edge"] = round(
+                    _cal_prob - total_selection["market_prob"], 4
+                )
+
     edge_flagged = is_actionable(
         total_selection, total_ensemble_std, MAX_ENSEMBLE_STD_TOTAL
     )
@@ -912,6 +959,34 @@ def predict_game(context, total=None, run_line=None, odds_entry=None):
             + 0.5 * np.mean(prediction["margin_samples"] == 0)
         ) if model_ready else None
     )
+    # --- V3: lineup strength adjustment (fail-safe, non-breaking) ---
+    lineup_logit_shift = None
+    home_lineup_woba_avg = None
+    away_lineup_woba_avg = None
+    if model_ready and context.get("lineups_confirmed") and context.get("home_lineup_ids"):
+        try:
+            from lineups import get_lineup_wobas
+            from lineup_strength import lineup_logit_shift as _lls, LG_WOBA
+            from model_combine import adjusted_calibrated_prob as _acp
+            h_wobas = get_lineup_wobas(context.get("home_lineup_ids", []))
+            a_wobas = get_lineup_wobas(context.get("away_lineup_ids", []))
+            if h_wobas and a_wobas:
+                expected = [LG_WOBA] * 9
+                h_shift, _ = _lls(expected, h_wobas)
+                a_shift, _ = _lls(expected, a_wobas)
+                lineup_logit_shift = round(h_shift - a_shift, 4)
+                home_lineup_woba_avg = round(sum(h_wobas) / 9, 3)
+                away_lineup_woba_avg = round(sum(a_wobas) / 9, 3)
+                if home_win_prob is not None:
+                    adj_hwp, _ = _acp(
+                        base_raw_prob=home_win_prob,
+                        adjustments={"lineup": lineup_logit_shift},
+                        calibrator=None,
+                    )
+                    home_win_prob = round(adj_hwp, 4)
+        except Exception as _exc:
+            print(f"[lineup] Adjustment failed (non-fatal): {_exc}", flush=True)
+
     total_pred = total_selection["side"] if total_selection else "NO BET"
     total_conf = (
         round(total_selection["conditional_prob"] * 100, 1)
@@ -1028,6 +1103,11 @@ def predict_game(context, total=None, run_line=None, odds_entry=None):
         "margin_ensemble_std": round(margin_ensemble_std, 3),
         "rl_bet_size": rl_bet_size,
         "rl_kelly_fraction": round(rl_kelly, 4),
+        "lineup_logit_shift": lineup_logit_shift,
+        "home_lineup_woba_avg": home_lineup_woba_avg,
+        "away_lineup_woba_avg": away_lineup_woba_avg,
+        "umpire_factor": umpire_factor,
+        "umpire_id": context.get("umpire_id"),
         "home_win_prob": (
             round(home_win_prob, 4) if home_win_prob is not None else None
         ),

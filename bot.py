@@ -171,7 +171,7 @@ def format_summary(games_data, now):
         for _, prediction, _ in games_data
     )
     message = (
-        f"⚾ MLB Edge V2 — {now}\n"
+        f"⚾ MLB Edge V3 — {now}\n"
         f"{len(games_data)} games {day_label} | {edge_count} bet(s)\n"
     )
     if not model_ready:
@@ -210,7 +210,7 @@ def format_summary(games_data, now):
                 f"({_price(prediction.get('rl_price'))}) | "
                 f"EV {_ev(prediction.get('rl_ev'))} {emoji} {size}\n"
             )
-    return message + "\nUse /v2_edge for full details."
+    return message + "\nUse /v3_edge for full details."
 
 
 def _format_detail(game, prediction):
@@ -283,7 +283,7 @@ def _format_detail(game, prediction):
 
 
 
-async def cmd_v2_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_v3_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del context
     from sheets import get_user_bets, units_won
     from collections import defaultdict
@@ -327,7 +327,8 @@ async def cmd_v2_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in detail_rows:
         by_date[str(row[0])[:10]].append(row)
 
-    lines = ["\U0001F4CA V2 Bet Tracker"]
+    _now_str = datetime.now(tz).strftime("%b %d, %Y %H:%M SGT")
+    lines = [f"\U0001F4CA V3 Bet Tracker ({_now_str})"]
     for date in sorted(by_date.keys(), reverse=True):
         lines.append(f"\n{date}:")
         day_total = 0.0
@@ -364,12 +365,12 @@ async def cmd_v2_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def cmd_v2_brief(
+async def cmd_v3_brief(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("⏳ Loading V2 edges...")
+    await update.message.reply_text("⏳ Loading V3 edges...")
     _, games_data = await fetch_all_games(ODDS_API_KEY)
     if not games_data:
         await update.message.reply_text("No MLB games available.")
@@ -378,12 +379,12 @@ async def cmd_v2_brief(
     await update.message.reply_text(format_summary(games_data, now))
 
 
-async def cmd_v2_edge(
+async def cmd_v3_edge(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("⏳ Fetching V2 edges...")
+    await update.message.reply_text("⏳ Fetching V3 edges...")
     _, games_data = await fetch_all_games(ODDS_API_KEY)
     edges = [
         (game, prediction)
@@ -400,13 +401,13 @@ async def cmd_v2_edge(
             for _, prediction, _ in games_data
         )
         reason = (
-            "⚠️ No trained V2 model is installed."
+            "⚠️ No trained V3 model is installed."
             if not model_ready
             else "No markets clear the EV and uncertainty filters."
         )
         await update.message.reply_text(reason)
         return
-    message = "⚾ MLB Edge V2 — full details\n\n"
+    message = "⚾ MLB Edge V3 — full details\n\n"
     message += "\n\n".join(
         _format_detail(game, prediction)
         for game, prediction in edges
@@ -415,7 +416,7 @@ async def cmd_v2_edge(
         await update.message.reply_text(message[start:start + 4096])
 
 
-async def cmd_v2_refresh(
+async def cmd_v3_refresh(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -435,16 +436,16 @@ async def cmd_v2_refresh(
         )
     )
     await update.message.reply_text(
-        f"✅ V2 refreshed: {len(games)} games, {edge_count} bets."
+        f"✅ V3 refreshed: {len(games)} games, {edge_count} bets."
     )
 
 
-async def cmd_v2_results(
+async def cmd_v3_results(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     del context
-    await update.message.reply_text("⏳ Fetching V2 results...")
+    await update.message.reply_text("⏳ Fetching V3 results...")
     try:
         from sheets import (
             get_results_date,
@@ -462,7 +463,7 @@ async def cmd_v2_results(
         from sheets import grade_user_bets
         grade_user_bets(results_date, results)
         predictions = get_stored_predictions(results_date)
-        lines = [f"⚾ MLB Edge V2 — Results {results_date}"]
+        lines = [f"⚾ MLB Edge V3 — Results {results_date}"]
         for result in results:
             prediction = predictions.get(result["game"])
             if not prediction or not (
@@ -493,7 +494,7 @@ async def cmd_v2_results(
         await update.message.reply_text(f"Result error: {exc}")
 
 
-async def cmd_v2_record(
+async def cmd_v3_record(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -503,10 +504,10 @@ async def cmd_v2_record(
 
         record = get_record()
         if not record or not record.get("settled_bets"):
-            await update.message.reply_text("No settled V2 bets yet.")
+            await update.message.reply_text("No settled V3 bets yet.")
             return
         message = (
-            "⚾ MLB Edge V2 Record\n"
+            "⚾ MLB Edge V3 Record\n"
             f"Settled bets: {record['settled_bets']}\n"
             f"Pushes: {record['pushes']}\n"
             f"W-L: {record['wins']}-{record['losses']}\n"
@@ -518,7 +519,7 @@ async def cmd_v2_record(
         await update.message.reply_text(f"Record error: {exc}")
 
 
-async def cmd_v2_status(
+async def cmd_v3_status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -541,7 +542,7 @@ async def cmd_v2_status(
         model_line = "MODEL NOT TRAINED - betting disabled"
         metric_line = "Run: python historical.py"
     await update.message.reply_text(
-        "⚾ MLB Edge V2\n"
+        "⚾ MLB Edge V3\n"
         f"{datetime.now(tz).strftime('%b %d %Y %H:%M SGT')}\n"
         f"Games loaded: {len(cached)}\n"
         f"{model_line}\n"
@@ -550,15 +551,15 @@ async def cmd_v2_status(
 
 
 def main():
-    print("Starting MLB Edge V2 Bot...")
+    print("Starting MLB Edge V3 Bot...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("v2_brief", cmd_v2_brief))
-    app.add_handler(CommandHandler("v2_bets", cmd_v2_bets))
-    app.add_handler(CommandHandler("v2_edge", cmd_v2_edge))
-    app.add_handler(CommandHandler("v2_refresh", cmd_v2_refresh))
-    app.add_handler(CommandHandler("v2_results", cmd_v2_results))
-    app.add_handler(CommandHandler("v2_record", cmd_v2_record))
-    app.add_handler(CommandHandler("v2_status", cmd_v2_status))
+    app.add_handler(CommandHandler("v3_brief", cmd_v3_brief))
+    app.add_handler(CommandHandler("v3_bets", cmd_v3_bets))
+    app.add_handler(CommandHandler("v3_edge", cmd_v3_edge))
+    app.add_handler(CommandHandler("v3_refresh", cmd_v3_refresh))
+    app.add_handler(CommandHandler("v3_results", cmd_v3_results))
+    app.add_handler(CommandHandler("v3_record", cmd_v3_record))
+    app.add_handler(CommandHandler("v3_status", cmd_v3_status))
 
     from scheduler import setup_scheduler
 
@@ -567,7 +568,7 @@ def main():
     async def post_init(application):
         del application
         scheduler.start()
-        print("V2 scheduler started")
+        print("V3 scheduler started")
         import threading
 
         thread = threading.Thread(
